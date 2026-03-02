@@ -14,6 +14,11 @@
     .hint { color: #666; font-size: 13px; }
     .card { border: 1px solid #ddd; border-radius: 14px; padding: 14px; }
     a { color: #0b66c3; }
+    #liveWrap::-webkit-scrollbar { width: 10px; height: 10px; }
+    #liveWrap::-webkit-scrollbar-track { background: rgba(30,30,30,.6); border-radius: 5px; }
+    #liveWrap::-webkit-scrollbar-thumb { background: #3b7dd8; border-radius: 5px; }
+    #liveWrap::-webkit-scrollbar-thumb:hover { background: #5a9bf0; }
+    #liveWrap { scrollbar-color: #3b7dd8 rgba(30,30,30,.6); }
   </style>
 </head>
 <body>
@@ -37,6 +42,85 @@
     </div>
     <div class="row hint">
       <span id="status">Status: (loading…)</span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="row" style="align-items:center">
+      <strong>Window Size</strong>
+      <button class="resizeBtn" data-w="1280" data-h="800">1280×800</button>
+      <button class="resizeBtn" data-w="1920" data-h="1080">1920×1080</button>
+      <button class="resizeBtn" data-w="2560" data-h="1440">2560×1440</button>
+      <label>W <input id="resizeW" size="5" placeholder="width" /></label>
+      <label>H <input id="resizeH" size="5" placeholder="height" /></label>
+      <button id="btnResizeCustom">Apply</button>
+      <button id="btnResizeMax">Maximize</button>
+      <button id="btnFitClient">Fit Client</button>
+      <span id="winInfo" class="hint"></span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="row" style="align-items:center">
+      <strong>Composer Input</strong>
+      <label><input type="checkbox" id="composerAppend" checked /> Append</label>
+      <span id="composerStatus" class="hint"></span>
+    </div>
+    <div style="margin:6px 0">
+      <textarea id="composerText" rows="4" placeholder="输入要发送到 Cursor Composer 的内容（支持多行）"
+        style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:10px;border:1px solid #ccc;font-family:inherit;font-size:14px;resize:vertical"></textarea>
+    </div>
+    <div class="row">
+      <button id="btnComposerInsert">Insert</button>
+      <button id="btnComposerSend">Send (Enter)</button>
+      <button id="btnComposerInsertSend" style="background:#e3f0ff;border-color:#8bb8f0">Insert &amp; Send</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="row" style="align-items:center">
+      <strong>Live View</strong>
+      <label>Refresh
+        <select id="liveRefreshSec">
+          <option value="1">1s</option>
+          <option value="2">2s</option>
+          <option value="3" selected>3s</option>
+          <option value="5">5s</option>
+          <option value="8">8s</option>
+          <option value="10">10s</option>
+          <option value="0">Manual</option>
+        </select>
+      </label>
+      <button id="btnLiveStart">Start Live</button>
+      <button id="btnLiveStop">Stop Live</button>
+      <button id="btnLiveRefresh">Refresh Now</button>
+      <label>Overflow
+        <select id="liveOverflow">
+          <option value="hidden">Hidden</option>
+          <option value="auto" selected>Auto</option>
+          <option value="scroll">Scroll</option>
+        </select>
+      </label>
+      <label>Height
+        <select id="liveHeight">
+          <option value="400">400px</option>
+          <option value="600" selected>600px</option>
+          <option value="800">800px</option>
+          <option value="full">Full</option>
+        </select>
+      </label>
+      <label>Scale <input id="liveScale" type="number" min="0.1" max="3" step="0.1" value="1" style="width:55px" /></label>
+      <span id="liveStatus" class="hint">stopped</span>
+    </div>
+    <div id="liveWrap" style="position:relative;width:100%;height:600px;margin-top:8px;display:none;overflow:auto;border:1px solid #ccc;border-radius:12px;background:#1e1e1e">
+      <iframe id="liveFrame0"
+        style="display:block;border:none;background:#1e1e1e;min-width:100%;min-height:100%"
+        sandbox="allow-scripts allow-same-origin"
+      ></iframe>
+      <iframe id="liveFrame1"
+        style="position:absolute;top:0;left:0;border:none;background:#1e1e1e;visibility:hidden"
+        sandbox="allow-scripts allow-same-origin"
+      ></iframe>
     </div>
   </div>
 
@@ -109,6 +193,241 @@
     if (!r.latest) return log({ ok: true, latest: null });
     window.open(r.url, '_blank');
   };
+
+  const liveWrapEl   = document.getElementById('liveWrap');
+  const liveFrames   = [document.getElementById('liveFrame0'), document.getElementById('liveFrame1')];
+  const liveStatusEl = document.getElementById('liveStatus');
+  const liveRefreshSel = document.getElementById('liveRefreshSec');
+  let liveTimer = null;
+  let liveRunning = false;
+  let liveActiveIdx = 0;
+  let liveInflight = false;
+  let livePendingRefresh = false;
+
+  function buildLiveUrl() {
+    const qs = new URLSearchParams({
+      host: hostEl.value.trim(), port: portEl.value.trim(),
+      selector: selEl.value.trim(), t: Date.now(),
+    });
+    const tok = tokenEl.value.trim();
+    if (tok) qs.set('token', tok);
+    return '/api/live?' + qs.toString();
+  }
+
+  function scheduleNext() {
+    if (!liveRunning) return;
+    const sec = Number(liveRefreshSel.value);
+    if (sec > 0) {
+      liveTimer = setTimeout(doLiveRefresh, sec * 1000);
+    }
+  }
+
+  function doLiveRefresh() {
+    if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+    if (liveInflight) {
+      livePendingRefresh = true;
+      return;
+    }
+    liveInflight = true;
+    livePendingRefresh = false;
+    liveWrapEl.style.display = 'block';
+
+    const nextIdx   = 1 - liveActiveIdx;
+    const nextFrame = liveFrames[nextIdx];
+    const curFrame  = liveFrames[liveActiveIdx];
+
+    // Preload in hidden absolute-positioned frame (keep large size so content renders fully)
+    nextFrame.style.position = 'absolute';
+    nextFrame.style.top = '0';
+    nextFrame.style.left = '0';
+    nextFrame.style.visibility = 'hidden';
+    nextFrame.style.width = curFrame.style.width || '4000px';
+    nextFrame.style.height = curFrame.style.height || '4000px';
+    const fetchStart = performance.now();
+    nextFrame.src = buildLiveUrl();
+    liveStatusEl.textContent = 'loading\u2026';
+
+    // Save scroll position from wrapper
+    const savedScrollTop = liveWrapEl.scrollTop;
+    const savedScrollLeft = liveWrapEl.scrollLeft;
+
+    nextFrame.onload = () => {
+      const loadMs = (performance.now() - fetchStart) | 0;
+      liveInflight = false;
+
+      // Measure actual content dimensions from .monaco-workbench (has explicit pixel size)
+      try {
+        const doc = nextFrame.contentDocument;
+        if (doc) {
+          doc.documentElement.style.overflow = 'hidden';
+          doc.body.style.overflow = 'hidden';
+          const wb = doc.querySelector('.monaco-workbench');
+          const cw = wb ? wb.offsetWidth : (doc.documentElement.scrollWidth || doc.body.scrollWidth);
+          const ch = wb ? wb.offsetHeight : (doc.documentElement.scrollHeight || doc.body.scrollHeight);
+          if (cw > 0) nextFrame.style.width = cw + 'px';
+          if (ch > 0) nextFrame.style.height = ch + 'px';
+        }
+      } catch {}
+
+      // Swap: hide old first, then show new (avoid both being in flow simultaneously)
+      curFrame.onload = null;
+      curFrame.style.visibility = 'hidden';
+      curFrame.style.position = 'absolute';
+      curFrame.src = 'about:blank';
+      nextFrame.style.position = 'static';
+      nextFrame.style.visibility = 'visible';
+      liveActiveIdx = nextIdx;
+
+      // Restore wrapper scroll position
+      liveWrapEl.scrollTop = savedScrollTop;
+      liveWrapEl.scrollLeft = savedScrollLeft;
+      liveStatusEl.textContent = 'live at ' + new Date().toLocaleTimeString() + ' (' + loadMs + 'ms)';
+      console.log('[live-view] iframe loaded in ' + loadMs + 'ms');
+      if (livePendingRefresh) {
+        doLiveRefresh();
+      } else {
+        scheduleNext();
+      }
+    };
+  }
+
+  function requestLiveRefresh() {
+    doLiveRefresh();
+  }
+
+  function startLive() {
+    liveRunning = true;
+    doLiveRefresh();
+  }
+
+  function stopLive() {
+    liveRunning = false;
+    liveInflight = false;
+    livePendingRefresh = false;
+    if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+    liveFrames.forEach((f, i) => {
+      f.onload = null; f.src = 'about:blank';
+      f.style.visibility = i === 0 ? 'visible' : 'hidden';
+      f.style.position = i === 0 ? 'static' : 'absolute';
+      f.style.width = ''; f.style.height = '';
+    });
+    liveActiveIdx = 0;
+    liveWrapEl.style.display = 'none';
+    liveStatusEl.textContent = 'stopped';
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.data?.type === 'cursor-auto-click-done' && liveRunning) {
+      requestLiveRefresh();
+    }
+  });
+
+  document.getElementById('btnLiveStart').onclick = startLive;
+  document.getElementById('btnLiveStop').onclick = stopLive;
+  document.getElementById('btnLiveRefresh').onclick = requestLiveRefresh;
+
+  // --- Overflow & height controls (on wrapper, not iframe) ---
+  const liveOverflowSel = document.getElementById('liveOverflow');
+  const liveHeightSel = document.getElementById('liveHeight');
+
+  liveOverflowSel.onchange = () => { liveWrapEl.style.overflow = liveOverflowSel.value; };
+  liveHeightSel.onchange = () => {
+    const v = liveHeightSel.value;
+    liveWrapEl.style.height = v === 'full' ? '90vh' : v + 'px';
+  };
+
+  const liveScaleEl = document.getElementById('liveScale');
+  function applyScale() {
+    const s = parseFloat(liveScaleEl.value) || 1;
+    liveFrames.forEach(f => {
+      f.style.transform = s === 1 ? '' : 'scale(' + s + ')';
+      f.style.transformOrigin = 'top left';
+      f.style.width = s === 1 ? '100%' : (100 / s) + '%';
+      f.style.height = s === 1 ? '100%' : (100 / s) + '%';
+    });
+  }
+  liveScaleEl.onchange = applyScale;
+  liveScaleEl.oninput = applyScale;
+
+  // --- Composer input controls ---
+  const composerTextEl = document.getElementById('composerText');
+  const composerAppendEl = document.getElementById('composerAppend');
+  const composerStatusEl = document.getElementById('composerStatus');
+
+  async function composerInsert(send) {
+    const text = composerTextEl.value;
+    if (!text && !send) return;
+    composerStatusEl.textContent = 'inserting…';
+    try {
+      const r = await post('/api/composer/insert', {
+        host: hostEl.value.trim(),
+        port: Number(portEl.value),
+        text,
+        append: composerAppendEl.checked,
+        send,
+      });
+      composerStatusEl.textContent = r.ok
+        ? (send ? 'sent ✓' : 'inserted ✓') + ' (' + r.lines + ' lines)'
+        : 'error: ' + (r.error || 'unknown');
+      log(r);
+    } catch (e) {
+      composerStatusEl.textContent = 'error';
+      log({ error: String(e) });
+    }
+  }
+
+  document.getElementById('btnComposerInsert').onclick = () => composerInsert(false);
+  document.getElementById('btnComposerInsertSend').onclick = () => composerInsert(true);
+  document.getElementById('btnComposerSend').onclick = async () => {
+    composerStatusEl.textContent = 'sending…';
+    try {
+      const r = await post('/api/composer/send', {
+        host: hostEl.value.trim(),
+        port: Number(portEl.value),
+      });
+      composerStatusEl.textContent = r.ok ? 'sent ✓' : 'error: ' + (r.error || 'unknown');
+      log(r);
+    } catch (e) {
+      composerStatusEl.textContent = 'error';
+      log({ error: String(e) });
+    }
+  };
+
+  // --- Window resize controls ---
+  const winInfoEl = document.getElementById('winInfo');
+
+  async function doResize(body) {
+    log('Resizing...');
+    const r = await post('/api/resize', { ...body, host: hostEl.value.trim(), port: Number(portEl.value) });
+    log(r);
+    updateWinInfo(r?.after);
+  }
+
+  function updateWinInfo(info) {
+    if (!info) return;
+    const max = info.maximized ? ' (maximized)' : '';
+    winInfoEl.textContent = info.outerWidth + '×' + info.outerHeight + max + ' dpr=' + info.devicePixelRatio;
+  }
+
+  const resizeWEl = document.getElementById('resizeW');
+  const resizeHEl = document.getElementById('resizeH');
+  document.querySelectorAll('.resizeBtn').forEach(btn => {
+    btn.onclick = () => { resizeWEl.value = btn.dataset.w; resizeHEl.value = btn.dataset.h; };
+  });
+  document.getElementById('btnResizeCustom').onclick = () => {
+    const w = Number(resizeWEl.value);
+    const h = Number(resizeHEl.value);
+    if (w > 0 || h > 0) doResize({ width: w || undefined, height: h || undefined });
+  };
+  document.getElementById('btnResizeMax').onclick = () => doResize({ maximize: true });
+  document.getElementById('btnFitClient').onclick = () => {
+    resizeWEl.value = liveWrapEl.clientWidth;
+    resizeHEl.value = liveWrapEl.clientHeight;
+  };
+
+  // Fetch initial window info
+  fetch('/api/resize/info?' + new URLSearchParams({ host: hostEl.value.trim(), port: portEl.value.trim() }), { headers: authHeaders() })
+    .then(r => r.json()).then(d => { if (d?.ok) updateWinInfo(d.web || d); }).catch(() => {});
 
   async function refreshStatus() {
     try {

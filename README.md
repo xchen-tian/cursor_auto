@@ -1,56 +1,34 @@
 # cursor_auto
 
-Automation utilities for Cursor / VS Code (Electron) by attaching to the Workbench Renderer via **Chrome DevTools Protocol (CDP)**.
+Automation utilities for **Cursor / VS Code (Electron)** by attaching to the Workbench Renderer via **Chrome DevTools Protocol (CDP)**.
 
-What you get:
+## Features
 
-1) **Auto-click** a Workbench DOM button (e.g. `.composer-run-button` “Fetch/Run”) using Playwright over CDP.
-2) **Static snapshot capture** of the current Workbench DOM:
-   - `index.html`: a best-effort static HTML snapshot (CSP removed, CSS inlined where possible, scripts removed)
-   - `snapshot.mhtml`: a best-effort MHTML archive from CDP (if supported)
-   - `screenshot.png`: full-page screenshot (always the most reliable “what you saw”)
-3) A tiny local web dashboard so you can trigger both actions from **another device** (phone/tablet) on your LAN.
-
----
-
-## Why static HTML capture is hard (based on your captured DOM)
-
-Your captured Workbench DOM (see `a.html` in your notes) contains:
-
-- A **very strict CSP** meta tag like:
-  - `default-src 'none'` and locked-down `script-src`, `img-src`, etc.
-  - If you host that HTML on a website as-is, the CSP will block most resources and inline execution.
-
-- Critical scripts and assets loaded via **Cursor/VS Code custom schemes**, e.g.:
-  - `vscode-file://vscode-app/.../workbench.js`
-  - `vscode-webview:`
-  - `vscode-remote-resource:` / `vscode-managed-remote-resource:`
-  - `blob:`
-
-A normal mobile browser cannot resolve `vscode-file://...` (it’s an Electron-internal scheme), and even if it could, those scripts expect VS Code/Cursor’s internal services (IPC, file service, command service, extension host, etc.).
-
-**So the realistic goal of “static capture” is a *read-only snapshot* for viewing**, not a fully functional Cursor UI.
-
-This project therefore:
-
-- Removes CSP meta from the captured HTML.
-- Inlines stylesheets that are retrievable via CDP (`Page.getResourceTree` + `Page.getResourceContent`).
-- Optionally embeds `<img>` as `data:` URLs if CDP can retrieve them.
-- Removes all `<script>` tags (otherwise they will error outside Electron).
-
-Even with all that:
-
-- Some icons/fonts/background images can still be missing (often referenced indirectly via CSS `url(...)` or via custom schemes).
-- Any interactive behavior will not work (it’s a snapshot).
+1. **Auto-click** — monitor and click Workbench DOM buttons (e.g. Composer Run/Fetch), with watch mode, scan-tabs mode, and AX status indicator
+2. **Static snapshot capture** — grab the Workbench DOM as offline-viewable HTML, MHTML, and screenshot
+3. **Live View** — real-time iframe preview of the Cursor UI with click forwarding (click in the preview, Cursor executes)
+4. **Composer Input** — programmatically insert text into the Cursor AI chat input and send messages via CDP
+5. **Window Resize** — resize/maximize/restore the Cursor window via Win32 API (physical pixels)
+6. **Web Dashboard** — phone/tablet-friendly control panel to trigger all actions from any LAN device
 
 ---
 
 ## Prerequisites
 
-- Node.js 18+
-- Cursor or VS Code **desktop** app (Electron)
-- You must launch Cursor/VS Code with a CDP port:
-  - `--remote-debugging-port=9222`
+- **Node.js 18+**
+- **Cursor or VS Code desktop** (Electron)
+- Launch with CDP port enabled:
+
+```bash
+# Windows (PowerShell)
+& "C:\Program Files\cursor\Cursor.exe" --remote-debugging-port=9222
+
+# macOS
+open -na "Cursor" --args --remote-debugging-port=9222
+
+# Or use the provided script
+.\start_cursor.ps1
+```
 
 Quick sanity check:
 
@@ -58,19 +36,7 @@ Quick sanity check:
 npm run doctor
 ```
 
-### Launch Cursor with CDP enabled (macOS)
-
-```bash
-open -na "Cursor" --args --remote-debugging-port=9222
-```
-
-If `open --args` doesn’t work on your machine, run the app binary directly:
-
-```bash
-/Applications/Cursor.app/Contents/MacOS/Cursor --remote-debugging-port=9222
-```
-
-### Verify the port is open
+Verify the port is open:
 
 ```bash
 curl -s http://127.0.0.1:9222/json/version
@@ -101,30 +67,24 @@ npm run click
 
 Polls the current chat tab and clicks whenever the button becomes ready.
 A visual **indicator** (spinning circle) is injected into the Cursor titlebar showing the current state.
+The spinner is clickable: click once to **pause**, click again to **resume**.
 
 ```bash
 npm run click:watch
 ```
 
-Indicator displays: `WATCH: idle` / `WATCH: SHIMMER` / `WATCH: RUN`
+Indicator displays: `WATCH: idle` / `WATCH: SHIMMER` / `WATCH: RUN` / `WATCH: paused`
 
 ### Scan-tabs mode
 
 Like watch mode, but automatically **cycles through all AI chat tabs** with smart scheduling.
-Tabs with recent activity (shimmer/run) are checked more frequently; idle tabs back off up to 60 seconds.
+Tabs with recent activity are checked more frequently; idle tabs back off up to 5 minutes.
 
 ```bash
 npm run click:watch:scan
 ```
 
-Indicator displays: `SCAN: idle [2] 13s` / `SCAN: SHIMMER [2]` / `SCAN: RUN [2]`
-
-The number in brackets is the tab index; the seconds value is the next check interval for that tab.
-
-### Duplicate process protection
-
-If you try to start a second auto_click process while one is already running, the script will warn and exit.
-Use `--force` to override this check.
+Indicator displays: `SCAN: idle [2] 13s` / `SCAN: SHIMMER [2]` / `SCAN: RUN [2]` / `SCAN: paused`
 
 ### Customize selector/text
 
@@ -153,7 +113,7 @@ All options:
 
 ## Static snapshot capture (CLI)
 
-Capture a snapshot (writes to `dist/capture/<timestamp>/...`):
+Capture a snapshot (writes to `dist/capture/<timestamp>/`):
 
 ```bash
 npm run capture
@@ -166,14 +126,40 @@ npm run capture:noimg
 ```
 
 Outputs per capture folder:
-- `index.html` – static snapshot for hosting/viewing
-- `report.json` – what was inlined/embedded and what was missing
-- `snapshot.mhtml` – best-effort archive (if the Electron build supports `Page.captureSnapshot`)
-- `screenshot.png` – always works, best “ground truth”
+
+| File | Description |
+|------|-------------|
+| `index.html` | Static snapshot — CSS inlined, scripts removed, CSP stripped |
+| `screenshot.png` | Full-page screenshot (always reliable) |
+| `snapshot.mhtml` | MHTML archive (best-effort, depends on Electron build) |
+| `report.json` | Resource inlining report (what succeeded / what's missing) |
 
 ---
 
-## Local web dashboard (phone-friendly)
+## Window resize (CLI)
+
+Resize the Cursor window using Win32 API (works even when maximized):
+
+```bash
+# Show current window info
+npm run resize:info
+
+# Resize to specific dimensions
+node src/resize_window.js -w 1920 -h 1080
+
+# Resize and center
+node src/resize_window.js -w 1280 -h 800 --center
+
+# Maximize / Restore
+node src/resize_window.js --maximize
+node src/resize_window.js --restore
+```
+
+> Note: dimensions are in **physical pixels**. On a display with dpr=1.25, Win32's 1920px = CSS's 1536px.
+
+---
+
+## Web dashboard
 
 Start server:
 
@@ -181,95 +167,193 @@ Start server:
 npm run server
 ```
 
-Open on the same machine:
-- http://localhost:5123
+Open: http://localhost:5123
 
-From your phone on the same LAN:
-- http://<your-computer-lan-ip>:5123
+From your phone on the same LAN: `http://<your-computer-lan-ip>:5123`
 
-### Optional auth (recommended)
+### Dashboard sections
 
-Set a token so random LAN devices can’t trigger clicks:
+| Section | What it does |
+|---------|-------------|
+| **Connection** | Configure CDP host/port, token, selector; trigger click/capture |
+| **Window Size** | Preset buttons (1280×800, 1920×1080, 2560×1440), custom W×H, maximize, fit-to-client |
+| **Composer Input** | Text area for inserting text into Cursor's AI chat, with Insert / Send / Insert & Send buttons |
+| **Live View** | Real-time iframe preview of Cursor UI with configurable refresh rate, overflow, height, and scale |
+| **Output** | JSON log of API responses |
+
+### Composer Input
+
+The Composer Input card lets you remotely type into Cursor's AI chat composer:
+
+- **Insert** — insert the text into the composer input box (does not send)
+- **Send (Enter)** — press Enter to send whatever is currently in the input box
+- **Insert & Send** — insert text then immediately send
+- **Append** checkbox — when unchecked, replaces existing content; when checked, appends to it
+
+Multiline text is supported: each `\n` is converted to `Shift+Enter` in the composer (since bare `Enter` sends the message).
+
+Under the hood this uses CDP `Input.insertText` for text and `Input.dispatchKeyEvent` for key simulation, which correctly handles **Chinese and other non-ASCII characters**.
+
+### Live View
+
+Real-time preview of the Cursor UI rendered as an iframe:
+
+- **Double-buffered** — new frame loads behind the scenes, then swaps in (no flicker)
+- **Click forwarding** — click anything in the preview and the click is dispatched to the real Cursor via CDP
+- **Configurable refresh** — 1s / 2s / 3s / 5s / 8s / 10s / manual
+- **Overflow / Height / Scale** controls to fit any screen
+
+### Optional auth
 
 ```bash
 export CURSOR_AUTO_TOKEN='change-me'
 npm run server
 ```
 
-Then your requests must include `x-token: change-me` header, or `?token=change-me`.
-
-The dashboard page supports this by providing a **Token** input.
-
-### New: Start/Stop auto-click from the dashboard
-
-Endpoints:
-
-- `POST /api/click` – click once
-- `POST /api/click/start` – start a single background watcher
-- `POST /api/click/stop` – stop the watcher
-- `GET  /api/click/status` – tail logs + running state
-- `GET  /api/status` – CDP reachability + watcher state + latest capture URL
-
-The dashboard auto-refreshes `/api/status` every ~2 seconds.
+Requests must include `x-token: change-me` header or `?token=change-me` query param.
 
 ---
 
-## “One-click deploy” for the static snapshot
+## REST API
 
-After `npm run capture`, you can host the generated folder:
+### Click
 
-- The latest snapshot is in: `dist/capture/<timestamp>/index.html`
-- Copy that folder to any static host (GitHub Pages, Netlify, Nginx, etc.)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/click` | Click once |
+| POST | `/api/click/start` | Start background auto-click watcher (singleton) |
+| POST | `/api/click/stop` | Stop watcher |
+| GET | `/api/click/status` | Watcher state + log tail |
 
-Example (quick local static host):
+### Composer
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/composer/insert` | Insert text into Cursor composer input |
+| POST | `/api/composer/send` | Press Enter to send current composer content |
+
+**`POST /api/composer/insert`** body:
+
+```json
+{
+  "text": "hello\nworld",
+  "append": true,
+  "send": false,
+  "host": "127.0.0.1",
+  "port": 9222
+}
+```
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `text` | string | `""` | Text to insert (supports `\n` for multiline) |
+| `append` | bool | `true` | `true` = append; `false` = replace existing content |
+| `send` | bool | `false` | Press Enter after inserting to send the message |
+
+### Capture & Live
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/capture` | Trigger static snapshot capture |
+| GET | `/api/live` | Render real-time HTML snapshot (for iframe) |
+| GET | `/api/latest` | Get latest capture URL |
+| POST | `/api/remote-click` | Forward a click to Cursor (used by Live View iframe) |
+
+### Window Resize
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/resize/info` | Current window dimensions and state |
+| POST | `/api/resize` | Resize/maximize the window |
+
+**`POST /api/resize`** body:
+
+```json
+{ "width": 1920, "height": 1080 }
+```
+
+or `{ "maximize": true }`
+
+### Status & Resources
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/status` | CDP reachability + watcher state + latest capture |
+| GET | `/api/vscode-file/*` | Proxy Cursor internal resources (fonts, icons) |
+
+---
+
+## npm scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run server` | Start Express server (port 5123) |
+| `npm run click` | Single click |
+| `npm run click:watch` | Continuous watch (single tab) |
+| `npm run click:watch:scan` | Continuous watch (multi-tab scan) |
+| `npm run capture` | Static snapshot |
+| `npm run capture:noimg` | Static snapshot without embedded images |
+| `npm run resize` | Resize window (see `--help`) |
+| `npm run resize:info` | Show current window info |
+| `npm run build` | Select model + Build |
+| `npm run build:models` | List available models |
+| `npm run doctor` | Health check |
+| `npm run site:build` | Generate static index site |
+
+---
+
+## Static snapshot hosting
+
+After `npm run capture`, host the generated folder:
 
 ```bash
 npx serve dist/capture
+# visit http://localhost:3000/<timestamp>/index.html
 ```
 
-Then visit:
-
-- http://localhost:3000/<timestamp>/index.html
-
-### Bonus: Build a simple static index page (good for publishing)
-
-This generates `dist/site/` with an `index.html` that lists all captures and links to each snapshot:
+Build a static index page linking all captures:
 
 ```bash
 npm run site:build
 npx serve dist/site
 ```
 
-Then publish `dist/site/` to any static host.
+---
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `5123` | Server listen port |
+| `BIND` | `0.0.0.0` | Bind address |
+| `CURSOR_AUTO_TOKEN` | (empty) | Enable token auth |
+| `CURSOR_APP_ROOT` | (auto-detected) | Manual Cursor `resources/app` path |
 
 ---
 
 ## Safety
 
-- **Do NOT** expose CDP port `9222` to the internet.
-- Keep it bound to localhost and only expose the *dashboard* to LAN if you need phone control.
+- **Do NOT** expose CDP port 9222 to the internet.
+- Keep it bound to localhost; only expose the dashboard to LAN if you need phone/tablet control.
+- Use `CURSOR_AUTO_TOKEN` when exposing the dashboard.
 
 ---
 
 ## Troubleshooting
 
-1) `Could not find a page containing selector`:
-   - Make sure Cursor is running and CDP port is enabled (`curl .../json/version`).
+1. **`Could not find a page containing selector`** — Make sure Cursor is running with `--remote-debugging-port=9222`.
 
-2) `Found existing auto_click process(es)`:
-   - Another auto_click is already running. Stop it first, or use `--force`.
-   - To find and kill stale processes: `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select-Object ProcessId,CommandLine`
+2. **`Found existing auto_click process(es)`** — Another instance is running. Stop it first, or use `--force`.
 
-3) Static snapshot looks unstyled:
-   - Some CSS may not be retrievable via CDP in your build.
-   - Check `report.json` for `missingCss`.
+3. **Static snapshot looks unstyled** — Check `report.json` for `missingCss`. Some CSS may not be retrievable via CDP.
 
-4) Missing icons/images:
-   - Many are referenced from CSS `url(...)` (not `<img>`). This tool embeds `<img>` sources, not all CSS-referenced assets.
+4. **Missing icons/images** — Many are referenced from CSS `url(...)`, not `<img>`. Check `report.json` for `missingImages`.
 
-5) Titlebar indicator not visible:
-   - Run `node src/test_indicator.js` to test injection independently.
-   - Run `node src/test_indicator.js --remove` to clean up a stuck indicator.
+5. **Titlebar indicator stuck** — Run `node src/test_indicator.js --remove` to clean up.
+
+6. **Composer input not found** — Make sure the Cursor Composer panel is open (the AI chat sidebar). The selector `.aislash-editor-input` must be present in the DOM.
+
+7. **Chinese text not appearing** — The Composer insert API uses CDP `Input.insertText` which supports Unicode natively. If issues persist, check that the composer input has focus.
 
 ---
 

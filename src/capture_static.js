@@ -8,6 +8,7 @@ const cheerio = require('cheerio');
 const mime = require('mime-types');
 
 const { connectOverCDP, findPageWithSelector } = require('./cdp');
+const { rewriteCssUrls } = require('./css_rewrite');
 
 function nowStamp() {
   const d = new Date();
@@ -182,13 +183,24 @@ async function main() {
       const res = abs ? await getResourceContent(abs) : null;
       if (res && (res.mimeType?.includes('css') || res.type === 'Stylesheet')) {
         const css = res.base64Encoded ? Buffer.from(res.content, 'base64').toString('utf8') : res.content;
-        $(el).replaceWith(`<style data-inlined-from="${escapeHtml(abs)}">\n${css}\n</style>`);
+        const rewritten = rewriteCssUrls(css, abs, '/api/vscode-file');
+        $(el).replaceWith(`<style data-inlined-from="${escapeHtml(abs)}">\n${rewritten}\n</style>`);
         report.inlinedCss.push(abs);
       } else {
         report.missingCss.push(abs || href || null);
       }
     }
   }
+
+  // 5b) Rewrite any pre-existing <style> tags (use the original page URL as base)
+  // This is important for contributed themes/icon fonts that reference vscode-file:// with CSS escapes.
+  $('style').each((_, el) => {
+    // Skip styles we already inlined+rewrote from <link rel="stylesheet">
+    if ($(el).attr('data-inlined-from')) return;
+    const original = $(el).html() || '';
+    const rewritten = rewriteCssUrls(original, info.pageUrl, '/api/vscode-file');
+    if (rewritten !== original) $(el).html(rewritten);
+  });
 
   // 6) Optionally embed <img> as data: URLs
   if (argv['embed-images']) {

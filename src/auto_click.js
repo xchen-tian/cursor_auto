@@ -75,7 +75,13 @@ async function detectActivity(page, { selector, containsText, shimmerSelector })
       ? btnNodes.some(n => (n.textContent || '').includes(containsText))
       : btnNodes.length > 0;
     const hasShimmer = document.querySelectorAll(shimmerSelector).length > 0;
-    return { hasRun, hasShimmer };
+    const bar = document.querySelector('.composer-bar[data-composer-status]');
+    const composerStatus = bar?.dataset?.composerStatus ?? null;
+    const headers = document.querySelectorAll('.composer-tool-call-top-header');
+    const hasRunningCmd = Array.from(headers).some(h =>
+      /^Runn?(?:ing)? command:/i.test((h.textContent || '').trim())
+    );
+    return { hasRun, hasShimmer, composerStatus, hasRunningCmd };
   }, { selector, containsText, shimmerSelector });
 }
 
@@ -179,12 +185,12 @@ class TabScheduler {
     }
   }
 
-  report(index, { hasRun, hasShimmer }) {
+  report(index, { hasRun, hasShimmer, composerStatus, hasRunningCmd }) {
     const s = this.tabs.get(index);
     if (!s) return;
     const now = Date.now();
 
-    if (hasRun || hasShimmer) {
+    if (hasRun || hasShimmer || composerStatus === 'generating' || hasRunningCmd) {
       s.waitMs = this.baseWaitMs;
       s.lastActivity = now;
       s.consecutiveIdle = 0;
@@ -197,24 +203,27 @@ class TabScheduler {
   }
 
   /**
-   * Guarantees at least baseWaitMs between any two switches.
-   * Among due tabs, picks the hottest (shortest waitMs).
-   * If none due, picks the one due soonest.
+   * waitMs = check period — each tab must be checked at least once per waitMs.
+   * Among due/overdue tabs, pick the one that has been neglected the longest
+   * (largest `now - nextCheckAt`). This guarantees every tab gets its turn.
+   * If none due, wait until the soonest one becomes due.
+   * Enforces at least baseWaitMs between any two switches.
    */
   pickNext() {
     const now = Date.now();
     const earliest = Math.max(this.lastSwitchAt + this.baseWaitMs, now);
 
-    let bestReady = null;
-    let bestReadyWait = Infinity;
+    let bestOverdue = null;
+    let bestOverdueBy = -1;
     let soonest = null;
     let soonestTime = Infinity;
 
     for (const [index, s] of this.tabs) {
       if (s.nextCheckAt <= earliest) {
-        if (s.waitMs < bestReadyWait) {
-          bestReadyWait = s.waitMs;
-          bestReady = index;
+        const overdueBy = earliest - s.nextCheckAt;
+        if (overdueBy > bestOverdueBy) {
+          bestOverdueBy = overdueBy;
+          bestOverdue = index;
         }
       }
       if (s.nextCheckAt < soonestTime) {
@@ -223,9 +232,9 @@ class TabScheduler {
       }
     }
 
-    if (bestReady !== null) {
-      const s = this.tabs.get(bestReady);
-      return { index: bestReady, waitUntil: earliest, label: s.label, waitMs: s.waitMs };
+    if (bestOverdue !== null) {
+      const s = this.tabs.get(bestOverdue);
+      return { index: bestOverdue, waitUntil: earliest, label: s.label, waitMs: s.waitMs };
     }
     if (soonest !== null) {
       const s = this.tabs.get(soonest);
@@ -343,21 +352,144 @@ async function main() {
     await closeAll(0);
   }
 
-  // -- watch mode (simple) --
-  if (!scanTabs) {
-    try { await indicator.inject(page); } catch (e) {
-      if (argv.verbose) console.log('Indicator injection failed (non-fatal):', e.message);
-    }
-    if (argv.verbose) console.log('Auto-click loop started. Press Ctrl+C to stop.');
+  // -- unified watch/scan loop with runtime mode switching --
+  const initialMode = scanTabs ? 'scan' : 'watch';
+  const schedulerConfig = { baseWaitMs: 3000, maxWaitMs: 300000, stepMs: 50000 };
+  let scheduler = new TabScheduler(schedulerConfig);
 
-    while (true) {
+  try { await indicator.inject(page, initialMode); } catch (e) {
+    if (argv.verbose) console.log('Indicator injection failed (non-fatal):', e.message);
+  }
+
+  if (argv.verbose) {
+    console.log(`Auto-click loop started (mode: ${initialMode}). Press Ctrl+C to stop.`);
+  }
+
+  async function sleepInterruptible(waitMs, expectedMode) {
+    let remain = Math.max(0, Number(waitMs) || 0);
+    while (remain > 0) {
+      const chunk = Math.min(remain, 500);
+      await sleep(chunk);
+      remain -= chunk;
+      const [pausedNow, modeNow] = await Promise.all([
+        indicator.getPaused(page),
+        indicator.getMode(page),
+      ]);
+      if (pausedNow || modeNow !== expectedMode) {
+        return { interrupted: true, paused: pausedNow, mode: modeNow };
+      }
+    }
+    return { interrupted: false, paused: false, mode: expectedMode };
+  }
+
+  let prevMode = initialMode;
+  let wasPaused = false;
+  let pausedShownMode = null;
+
+  while (true) {
+    const mode = await indicator.getMode(page);
+    const paused = await indicator.getPaused(page);
+
+    if (paused) {
+      const pausedLabel = mode === 'scan' ? 'SCAN: paused' : 'WATCH: paused';
+      if (!wasPaused || pausedShownMode !== mode) {
+        try { await indicator.update(page, 'paused', pausedLabel); } catch {}
+        if (argv.verbose) console.log(`[PAUSE] ${mode}`);
+        pausedShownMode = mode;
+      }
+      wasPaused = true;
+      await sleep(Math.min(Math.max(argv.interval, 500), 1500));
+      continue;
+    }
+
+    if (wasPaused) {
+      wasPaused = false;
+      pausedShownMode = null;
+      if (mode === 'scan') {
+        // Resume behaves like restart for scan scheduling.
+        scheduler = new TabScheduler(schedulerConfig);
+      }
+      try {
+        await indicator.update(page, 'init', mode === 'scan' ? 'SCAN: resumed' : 'WATCH: resumed');
+      } catch {}
+      if (argv.verbose) console.log(`[RESUME] ${mode}`);
+      await sleep(settleMs);
+    }
+
+    // Detect mode switch → show init
+    if (mode !== prevMode) {
+      const label = mode === 'scan' ? 'SCAN: init' : 'WATCH: init';
+      try { await indicator.update(page, 'init', label); } catch {}
+      if (argv.verbose) console.log(`[MODE] ${prevMode} → ${mode}`);
+      if (mode === 'scan') scheduler = new TabScheduler(schedulerConfig);
+      prevMode = mode;
+      await sleep(settleMs);
+    }
+
+    if (mode === 'scan') {
+      // === SCAN MODE ===
+      scheduler.sync(await listChatTabs(page, tabSel));
+
+      const pick = scheduler.pickNext();
+      if (!pick) { await sleep(1000); continue; }
+
+      const delay = pick.waitUntil - Date.now();
+      if (delay > 0) {
+        const waitResult = await sleepInterruptible(delay, mode);
+        if (waitResult.interrupted) continue;
+      }
+
+      // Show init (gray) while switching tab
+      try { await indicator.update(page, 'init', `SCAN: [${pick.index}] ${pick.label}`); } catch {}
+
+      const sw = await clickChatTab(page, tabSel, pick.index);
+      if (!sw.ok) {
+        if (argv.verbose) console.log(`Tab ${pick.index} switch failed: ${sw.reason}`);
+        continue;
+      }
+      await sleep(settleMs);
+      try { await scrollChatToBottom(page); } catch {}
+
       const activity = await detectActivity(page, activityOpts);
-      const tag = activity.hasRun ? 'RUN' : activity.hasShimmer ? 'SHIMMER' : 'idle';
+      scheduler.report(pick.index, activity);
+
+      const isGen = activity.composerStatus === 'generating';
+      const isActive = activity.hasShimmer || isGen;
+      const tag = activity.hasRun ? 'RUN' : activity.hasRunningCmd ? 'RUN'
+        : isActive ? 'SHIMMER' : 'idle';
+      try {
+        if (activity.hasRun || activity.hasRunningCmd) {
+          await indicator.update(page, 'clicked', `SCAN: RUN [${pick.index}]`);
+        } else if (isActive) {
+          await indicator.update(page, 'shimmer', `SCAN: SHIMMER [${pick.index}]`);
+        } else {
+          const sec = (scheduler.tabs.get(pick.index)?.waitMs / 1000).toFixed(0);
+          await indicator.update(page, 'scanning', `SCAN: idle [${pick.index}] ${sec}s`);
+        }
+      } catch {}
+
+      if (argv.verbose) {
+        const sec = (scheduler.tabs.get(pick.index)?.waitMs / 1000).toFixed(0);
+        console.log(`[${tag}] tab ${pick.index} "${sw.label}" next:${sec}s  |  ${scheduler.statusLine()}`);
+      }
+
+      if (activity.hasRun) {
+        const r = await clickOnce(page, clickOpts);
+        if (argv.verbose) console.log(r.ok ? '  >> Clicked OK' : `  >> Click failed: ${r.reason}`);
+      }
+
+    } else {
+      // === WATCH MODE ===
+      const activity = await detectActivity(page, activityOpts);
+      const isGen = activity.composerStatus === 'generating';
+      const isActive = activity.hasShimmer || isGen;
+      const tag = activity.hasRun ? 'RUN' : activity.hasRunningCmd ? 'RUN'
+        : isActive ? 'SHIMMER' : 'idle';
 
       try {
-        if (activity.hasRun) {
+        if (activity.hasRun || activity.hasRunningCmd) {
           await indicator.update(page, 'clicked', 'WATCH: RUN');
-        } else if (activity.hasShimmer) {
+        } else if (isActive) {
           await indicator.update(page, 'shimmer', 'WATCH: SHIMMER');
         } else {
           await indicator.update(page, 'scanning', 'WATCH: idle');
@@ -371,67 +503,8 @@ async function main() {
         console.log(`[${tag}]`);
       }
 
-      await sleep(argv.interval);
-    }
-  }
-
-  // -- watch mode (scan-tabs with scheduler + indicator) --
-  const scheduler = new TabScheduler({ baseWaitMs: 3000, maxWaitMs: 60000, stepMs: 5000 });
-  const tabs = await listChatTabs(page, tabSel);
-  scheduler.sync(tabs);
-
-  try { await indicator.inject(page); } catch (e) {
-    if (argv.verbose) console.log('Indicator injection failed (non-fatal):', e.message);
-  }
-
-  if (argv.verbose) {
-    console.log('Auto-click loop started (smart scan). Press Ctrl+C to stop.');
-    console.log(`Found ${tabs.length} chat tab(s):`);
-    tabs.forEach((t, i) => console.log(`  [${i}] ${t.label}${t.selected ? ' (active)' : ''}`));
-  }
-
-  while (true) {
-    scheduler.sync(await listChatTabs(page, tabSel));
-
-    const pick = scheduler.pickNext();
-    if (!pick) { await sleep(1000); continue; }
-
-    const delay = pick.waitUntil - Date.now();
-    if (delay > 0) await sleep(delay);
-
-    try { await indicator.update(page, 'scanning', `SCAN: [${pick.index}] ${pick.label}`); } catch {}
-
-    const sw = await clickChatTab(page, tabSel, pick.index);
-    if (!sw.ok) {
-      if (argv.verbose) console.log(`Tab ${pick.index} switch failed: ${sw.reason}`);
-      continue;
-    }
-    await sleep(settleMs);
-    try { await scrollChatToBottom(page); } catch {}
-
-    const activity = await detectActivity(page, activityOpts);
-    scheduler.report(pick.index, activity);
-
-    try {
-      if (activity.hasRun) {
-        await indicator.update(page, 'clicked', `SCAN: RUN [${pick.index}]`);
-      } else if (activity.hasShimmer) {
-        await indicator.update(page, 'shimmer', `SCAN: SHIMMER [${pick.index}]`);
-      } else {
-        const sec = (scheduler.tabs.get(pick.index)?.waitMs / 1000).toFixed(0);
-        await indicator.update(page, 'scanning', `SCAN: idle [${pick.index}] ${sec}s`);
-      }
-    } catch {}
-
-    if (argv.verbose) {
-      const tag = activity.hasRun ? 'RUN' : activity.hasShimmer ? 'SHIMMER' : 'idle';
-      const sec = (scheduler.tabs.get(pick.index)?.waitMs / 1000).toFixed(0);
-      console.log(`[${tag}] tab ${pick.index} "${sw.label}" next:${sec}s  |  ${scheduler.statusLine()}`);
-    }
-
-    if (activity.hasRun) {
-      const r = await clickOnce(page, clickOpts);
-      if (argv.verbose) console.log(r.ok ? '  >> Clicked OK' : `  >> Click failed: ${r.reason}`);
+      const waitResult = await sleepInterruptible(argv.interval, mode);
+      if (waitResult.interrupted) continue;
     }
   }
 }

@@ -1,0 +1,340 @@
+# cursor_auto — 项目规则与全面概述
+
+## 项目简介
+
+cursor_auto 是一套 **Cursor / VS Code (Electron) 自动化工具集**，通过 Chrome DevTools Protocol (CDP) 连接到运行中的 Cursor 实例，实现：
+
+1. **自动点击** — 监控并自动点击 Composer 的 Run/Fetch 按钮（单次、持续监控、多标签扫描三种模式）
+2. **静态快照捕获** — 抓取 Workbench DOM 生成可离线查看的 HTML/MHTML/截图
+3. **实时预览 (Live View)** — 通过 iframe 流式展示 Cursor 界面快照，支持点击转发到真实 Cursor
+4. **Web Dashboard** — 手机/平板友好的控制面板，可在局域网任意设备上触发操作
+5. **模型切换与构建** — 通过 CDP 操控 Composer 下拉菜单切换模型并触发 Build
+
+核心前提：Cursor 必须以 `--remote-debugging-port=9222` 启动。
+
+---
+
+## 技术栈
+
+| 技术 | 版本/说明 |
+|------|-----------|
+| Node.js | >= 18，使用 CommonJS (`require` / `module.exports`) |
+| playwright-core | ^1.58 — 通过 `chromium.connectOverCDP()` 连接 CDP |
+| Express | ^5.2 — HTTP 服务器和 REST API |
+| cheerio | ^1.2 — 服务端 HTML 解析与操作 |
+| yargs | ^18 — CLI 参数解析 |
+| mime-types | ^3.0 — MIME 类型检测 |
+
+**绝不使用 ES Modules**（项目全程 CommonJS）。
+
+---
+
+## 架构总览
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                 Express Server (server.js)                        │
+│  端口 5123 | 认证: CURSOR_AUTO_TOKEN | Dashboard + REST API      │
+└──┬──────────────────┬──────────────────┬─────────────────────────┘
+   │                  │                  │
+   │ /api/click ──────┼─ spawn ───► auto_click.js ───► CDP ──► Cursor
+   │ /api/capture ────┼─ spawn ───► capture_static.js ─► CDP
+   │ /api/live ───────┼─ spawn ───► live_snapshot.js ──► CDP (stdout pipe)
+   │ /api/vscode-file/*  ──► 读取 appRoot 下的文件（字体、图标等）
+   │ /api/remote-click ──► spawn auto_click.js --once
+   │                  │
+   │ 静态文件:         │
+   │  /              ─┼─► public/index.html (Dashboard)
+   │  /captures/     ─┼─► dist/capture/<timestamp>/ (历史快照)
+   └──────────────────┴──────────────────────────────────────────────
+
+共享模块:
+  cdp.js          — connectOverCDP(), findPageWithSelector(), sleep()
+  css_rewrite.js  — rewriteCssUrls()
+  indicator.js    — AX status 指示器 inject/update/remove
+```
+
+核心设计原则：**主进程 (server.js) 只做路由和 pipe，所有 CDP 操作在子进程中执行**。
+
+---
+
+## 目录结构
+
+```
+cursor_auto/
+├── src/                    # 所有后端脚本
+│   ├── cdp.js              # CDP 连接工具（所有脚本共用）
+│   ├── server.js           # Express HTTP 服务入口
+│   ├── auto_click.js       # 自动点击（once / watch / scan-tabs）
+│   ├── capture_static.js   # 静态快照捕获（写磁盘）
+│   ├── live_snapshot.js    # 实时快照（stdout 流式输出）
+│   ├── css_rewrite.js      # CSS url() 改写（纯函数）
+│   ├── indicator.js        # AX status（标题栏状态指示器）
+│   ├── get_resource_path.js# 自动发现 Cursor 安装路径
+│   ├── build.js            # 模型切换 + Build 触发
+│   ├── build_site.js       # 静态站点生成器
+│   ├── doctor.js           # 健康检查 / 诊断
+│   └── test_indicator.js   # 指示器独立测试
+├── public/
+│   └── index.html          # Web Dashboard（含 Live View iframe）
+├── dist/                   # 构建产物（gitignore）
+│   ├── capture/<timestamp>/  # 每次快照的输出目录
+│   └── site/               # 静态站点
+├── docs/
+│   └── server-design.md    # 服务器设计文档（中文）
+├── package.json
+├── start_cursor.ps1        # 快捷启动 Cursor（带 CDP 端口）
+└── README.md               # 英文使用文档
+```
+
+---
+
+## 源文件详解
+
+### `src/cdp.js` — CDP 连接核心
+
+所有需要连接 Cursor 的脚本共用此模块。
+
+| 导出函数 | 签名 | 说明 |
+|----------|------|------|
+| `connectOverCDP` | `({host, port}) → {browser, context, url}` | 通过 Playwright 连接 CDP 端点 |
+| `findPageWithSelector` | `(context, {selector, containsText, timeoutMs, pollMs}) → page|null` | 轮询所有 page 找到含指定 selector 的页面 |
+| `sleep` | `(ms) → Promise` | 延迟 |
+
+### `src/server.js` — HTTP 服务
+
+Express 5 服务器。环境变量：`PORT`(5123)、`BIND`(0.0.0.0)、`CURSOR_AUTO_TOKEN`、`CURSOR_APP_ROOT`。
+
+- `runNode()` — 跑一次性子进程脚本
+- `spawnNodeLong()` — 跑长期 watcher（auto-click 循环）
+- watcher 单例：同时只允许一个 auto-click 进程
+- `resolveAppRoot()` — 带缓存的 appRoot 发现（用于 vscode-file 代理）
+- `/api/live` 路由直接 pipe 子进程 stdout 到 HTTP response
+
+### `src/auto_click.js` — 自动点击
+
+三种运行模式：
+
+| 模式 | 参数 | 说明 |
+|------|------|------|
+| 单次 (once) | `--once` | 点击一次退出 |
+| 持续监控 (watch) | 默认 | 按 `--interval` 轮询当前标签页 |
+| 标签扫描 (scan-tabs) | `--scan-tabs` | 智能切换所有聊天标签页 |
+
+关键内部类/函数：
+- `clickOnce(page, opts)` — 在页面执行点击（支持 readyAttr 检查）
+- `detectActivity(page, opts)` — 检测 shimmer / run / generating 状态
+- `scrollChatToBottom(page)` — 滚动聊天到底部
+- `listChatTabs(page, sel)` / `clickChatTab(page, sel, index)` — 标签页管理
+- `TabScheduler` — 优先级调度器（活跃标签检查频繁，空闲标签回退到 60s）
+- `findExistingProcesses()` — Windows 进程冲突检测（PowerShell `Get-CimInstance`）
+
+### `src/capture_static.js` — 静态快照
+
+输出到 `dist/capture/<timestamp>/`：
+- `index.html` — 静态快照（内联 CSS、嵌入图片为 data: URI、移除 script）
+- `screenshot.png` — 全页截图
+- `snapshot.mhtml` — MHTML 归档（best-effort）
+- `report.json` — 资源内联/缺失报告
+
+### `src/live_snapshot.js` — 实时快照
+
+轻量版 capture_static，输出到 stdout（不写磁盘）。关键区别：
+- 不截图、不生成 MHTML
+- 注入**点击转发脚本**（用户在 iframe 点击 → POST /api/remote-click → CDP 在 Cursor 执行真实点击）
+- 改写 `vscode-file://` URL 到 `/api/vscode-file/` 代理路径
+
+### `src/css_rewrite.js` — CSS URL 改写
+
+纯函数 `rewriteCssUrls(cssText, cssFileUrl, proxyBase)`：
+- `url(vscode-file://vscode-app/<path>)` → `url(/api/vscode-file/<path>)`
+- 相对 URL 先解析为绝对路径再改写
+- 保留 `data:`、`http:`、`https:` 不动
+- 去除 query string 和 hash
+
+### `src/indicator.js` — AX status（标题栏状态指示器）
+
+在 Cursor `.titlebar-right` 注入旋转动画指示器，项目内统一称为 **AX status**。
+
+| 状态 | 颜色 | 转速 | 含义 |
+|------|------|------|------|
+| scanning | 红色 | 1s | 扫描中 |
+| shimmer | 橙色 | 0.8s | 检测到活动 |
+| generating | 绿色(慢) | 1.2s | AI 生成中 |
+| clicked | 绿色(快) | 0.6s | 已点击 Run |
+
+API: `inject(page)`, `update(page, state, text)`, `remove(page)`
+
+### `src/get_resource_path.js` — 应用根目录发现
+
+按优先级：已知安装路径 → CDP `process.resourcesPath` → `CURSOR_APP_ROOT` 环境变量。
+跨平台支持 Windows / macOS / Linux。
+
+### `src/build.js` — 模型切换与构建
+
+操控 Composer UI：
+- 打开模型下拉菜单 → 选择指定模型
+- 点击 Build/Plan 按钮
+- 支持 `--list-models` 列出可用模型
+
+### `src/build_site.js` — 静态站点生成
+
+将 `dist/capture/` 下所有快照打包成一个带缩略图索引的静态站点 (`dist/site/`)。
+
+### `src/doctor.js` — 诊断工具
+
+检查 Node 版本 → 探测 CDP 端点 → 测试 Playwright 连接。
+
+---
+
+## API 端点
+
+### 点击相关
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/click` | 单次点击 |
+| POST | `/api/click/start` | 启动持续监控（单例） |
+| POST | `/api/click/stop` | 停止监控 |
+| GET | `/api/click/status` | 获取监控状态和日志尾部 |
+| POST | `/api/remote-click` | Live View iframe 内点击转发 |
+
+### Composer 输入
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/composer/insert` | 向 Composer 输入框插入文字（CDP Input.insertText） |
+| POST | `/api/composer/send` | 按 Enter 发送当前 Composer 内容 |
+
+### 快照相关
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/capture` | 触发静态快照 |
+| GET | `/api/live` | 流式返回实时 HTML 快照 |
+| GET | `/api/latest` | 获取最新快照 URL |
+
+### 状态与资源
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/status` | CDP 状态 + watcher 状态 + 最新快照 |
+| GET | `/api/vscode-file/*` | 代理 Cursor 内部资源文件（字体、图标等） |
+
+---
+
+## Cursor UI 的关键 CSS 选择器
+
+这些是 Cursor Electron 界面中使用到的 DOM 选择器，**可能随 Cursor 版本更新而变化**：
+
+| 选择器 | 用途 |
+|--------|------|
+| `.monaco-workbench` | 主 Workbench 容器（用于定位页面） |
+| `.composer-run-button` | Composer Run/Fetch 按钮 |
+| `.ui-tool-call-line-shimmer` | 工具调用行 shimmer 动画 |
+| `.ui-task-tool-call__shimmer` | 任务工具调用 shimmer |
+| `.ui-collapsible-shimmer` | 可折叠区域 shimmer |
+| `.composer-bar[data-composer-status]` | Composer 状态栏 |
+| `.composer-tool-call-top-header` | 工具调用顶部标题 |
+| `.composer-unified-dropdown-model` | 模型选择下拉框 |
+| `.composer-unified-dropdown-item[data-is-model]` | 下拉框中的模型项 |
+| `.composer-create-plan-build-button` | Build/Plan 按钮 |
+| `.send-with-mode .anysphere-icon-button[data-stop-button="true"]` | 停止按钮 |
+| `.aislash-editor-input` | Composer 文本输入框（Lexical contenteditable） |
+| `.titlebar-right` | 标题栏右侧（指示器注入点） |
+| `[data-click-ready="true"]` | 按钮就绪标记 |
+
+---
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PORT` | 5123 | 服务器监听端口 |
+| `BIND` | 0.0.0.0 | 绑定地址 |
+| `CURSOR_AUTO_TOKEN` | (空) | 设置后启用 token 认证 |
+| `CURSOR_APP_ROOT` | (自动发现) | 手动指定 Cursor `resources/app` 目录 |
+
+---
+
+## npm scripts
+
+| 命令 | 说明 |
+|------|------|
+| `npm run server` | 启动 Express 服务器 |
+| `npm run click` | 单次点击 |
+| `npm run click:watch` | 持续监控（单标签） |
+| `npm run click:watch:scan` | 持续监控（多标签扫描） |
+| `npm run capture` | 静态快照 |
+| `npm run capture:noimg` | 静态快照（不嵌入图片） |
+| `npm run build` | 选模型 + Build |
+| `npm run build:models` | 列出可用模型 |
+| `npm run doctor` | 健康检查 |
+| `npm run site:build` | 生成静态站点 |
+
+---
+
+## 代码规范
+
+1. **CommonJS only** — 使用 `require()` / `module.exports`，不使用 ES Modules
+2. **async/await** — 所有异步操作统一用 async/await
+3. **CDP 连接统一入口** — 必须通过 `src/cdp.js` 的 `connectOverCDP()` 连接
+4. **子进程隔离** — server.js 不直接做 CDP 操作，通过 `runNode()` / `spawnNodeLong()` 在子进程执行
+5. **CLI 参数用 yargs** — 所有 CLI 脚本用 yargs 解析参数
+6. **HTML 操作用 cheerio** — 服务端 HTML 解析统一使用 cheerio
+7. **脚本放 `src/`** — 前端静态文件放 `public/`，构建产物输出到 `dist/`
+8. **Windows 优先** — 主开发环境为 Windows，脚本兼容 PowerShell
+
+---
+
+## 安全措施
+
+| 措施 | 位置 | 说明 |
+|------|------|------|
+| Token 认证 | server.js 中间件 | 可选，CURSOR_AUTO_TOKEN 环境变量启用 |
+| 路径遍历防护 | `/api/vscode-file/*` | 过滤 `..` 段 + `path.resolve().startsWith()` |
+| CSP 移除 | live_snapshot / capture_static | Electron CSP 会阻断静态渲染，必须移除 |
+| iframe sandbox | public/index.html | `allow-scripts allow-same-origin` |
+| Watcher 单例 | server.js | 同时只能运行一个 auto-click 进程 |
+| 进程冲突检测 | auto_click.js | 启动前检查是否已有实例运行 |
+
+---
+
+## 开发注意事项
+
+1. **修改代码后必须检查是否影响其他功能** — 多个脚本共用 cdp.js、css_rewrite.js、indicator.js
+2. **Cursor UI 选择器可能变化** — 关注 `SHIMMER_SELECTORS`、`SEL` 对象中的选择器是否与当前 Cursor 版本匹配
+3. **API 参数类型和名称需严格匹配** — 检查 Playwright CDP API、Express 路由参数
+4. **暴露 CDP 端口到公网** — 9222 端口不仅绑定 localhost，
+5. **Live View 每次加载需 5-15 秒** — CDP 往返 + CSS 内联是瓶颈
+6. **Express 5 通配符语法** — 使用 `*filePath` 而非 `:path(*)` 形式
+7. **Windows 环境** — 进程检测使用 PowerShell 的 `Get-CimInstance`，路径分隔符注意 `\\`
+
+---
+
+## 数据流
+
+### Live View 完整链路
+
+```
+Dashboard (index.html) → GET /api/live?host=...&port=...
+  → server.js spawn live_snapshot.js
+    → CDP connectOverCDP → findPageWithSelector
+    → Page.getResourceTree（资源映射）
+    → page.content()（DOM HTML）
+    → 内联 CSS + rewriteCssUrls()
+    → 注入点击转发脚本
+    → stdout.write(html) → pipe → HTTP response → iframe
+  → iframe 渲染，请求 /api/vscode-file/* 获取字体/图标
+  → 用户点击 → POST /api/remote-click → auto_click.js → CDP → Cursor
+```
+
+### vscode-file 代理链路
+
+```
+CSS url(../../media/codicon.ttf)
+  → rewriteCssUrls() 解析为 /api/vscode-file/out/media/codicon.ttf
+  → 浏览器请求 /api/vscode-file/out/media/codicon.ttf
+  → server.js resolveAppRoot() → 找到 Cursor app 目录
+  → 安全检查 → res.sendFile()
+```

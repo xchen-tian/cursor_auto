@@ -16,6 +16,8 @@
     "site:build": "node src/build_site.js",
     "build": "node src/build.js --verbose",
     "build:models": "node src/build.js --list-models --verbose",
+    "resize": "node src/resize_window.js",
+    "resize:info": "node src/resize_window.js --info",
     "help": "node src/auto_click.js --help"
   },
   "keywords": [],

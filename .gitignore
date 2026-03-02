@@ -16,9 +16,10 @@ Desktop.ini
 .vscode/
 !.cursor/rules/
 
-# Proxy scripts
+# Proxy scripts & runtime
 start_claude_proxy.ps1
 stop_claude_proxy.ps1
+.proxy_watchdog.pid
 
 # Environment
 .env
