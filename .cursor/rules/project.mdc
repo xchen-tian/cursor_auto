@@ -1,0 +1,42 @@
+---
+description: cursor_auto 项目约定 — Node.js + Playwright CDP 自动化 Cursor IDE
+alwaysApply: true
+---
+
+# 项目概述
+
+cursor_auto 通过 Chrome DevTools Protocol (CDP) 连接到 Cursor/VS Code 实例，实现自动点击、截图捕获、页面诊断等自动化操作。
+
+## 技术栈
+
+- **Runtime**: Node.js >=18, CommonJS (`require`)
+- **CDP 连接**: playwright-core (`chromium.connectOverCDP`)
+- **HTTP 服务**: Express
+- **HTML 解析**: cheerio
+- **CLI 参数**: yargs
+
+## 代码规范
+
+- 使用 CommonJS 模块 (`require` / `module.exports`)，不使用 ES Modules
+- 异步操作统一使用 `async/await`
+- CDP 连接入口统一通过 `src/cdp.js` 的 `connectOverCDP()`
+- 脚本入口放在 `src/` 目录，前端静态文件放在 `public/`
+- 构建产物输出到 `dist/`
+
+## 关键文件
+
+| 文件 | 用途 |
+|------|------|
+| `src/cdp.js` | CDP 连接与页面查找工具函数 |
+| `src/auto_click.js` | 自动点击核心逻辑 |
+| `src/capture_static.js` | 页面截图与快照捕获 |
+| `src/server.js` | Express HTTP 服务 |
+| `src/build.js` | 构建脚本 |
+| `src/doctor.js` | 诊断工具 |
+
+## 注意事项
+
+- 默认 CDP 端口为 `9222`（`--remote-debugging-port`）
+- Windows 环境为主，PowerShell 脚本用 `.ps1` 后缀
+- 修改代码后务必检查是否影响已有功能
+- API 调用需确认参数类型、名称与版本兼容性

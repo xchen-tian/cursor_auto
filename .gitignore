@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output & captures
+dist/
+
+# Logs
+*.log
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+!.cursor/rules/
+
+# Proxy scripts
+start_claude_proxy.ps1
+stop_claude_proxy.ps1
+
+# Environment
+.env
+.env.*

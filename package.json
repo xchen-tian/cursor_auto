@@ -1,0 +1,32 @@
+{
+  "name": "cursor_auto",
+  "version": "1.0.0",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "server": "node src/server.js",
+    "click": "node src/auto_click.js --once",
+    "click:watch": "node src/auto_click.js --verbose",
+    "click:watch:scan": "node src/auto_click.js --verbose --scan-tabs",
+    "capture": "node src/capture_static.js --selector .monaco-workbench",
+    "capture:noimg": "node src/capture_static.js --selector .monaco-workbench --embed-images=false",
+    "doctor": "node src/doctor.js",
+    "site:build": "node src/build_site.js",
+    "build": "node src/build.js --verbose",
+    "build:models": "node src/build.js --list-models --verbose",
+    "help": "node src/auto_click.js --help"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "express": "^5.2.1",
+    "mime-types": "^3.0.2",
+    "playwright-core": "^1.58.2",
+    "yargs": "^18.0.0"
+  }
+}

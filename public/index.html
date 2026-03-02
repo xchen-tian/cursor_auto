@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>cursor_auto</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; line-height: 1.4; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
+    button:hover { background: #efefef; }
+    input { padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; }
+    pre { background: #0b0b0b; color: #eaeaea; padding: 12px; border-radius: 12px; overflow: auto; }
+    .hint { color: #666; font-size: 13px; }
+    .card { border: 1px solid #ddd; border-radius: 14px; padding: 14px; }
+    a { color: #0b66c3; }
+  </style>
+</head>
+<body>
+  <h1>cursor_auto</h1>
+  <p class="hint">Prereq: Start Cursor/VS Code with <code>--remote-debugging-port=9222</code>. Then this page can auto-click or capture a static snapshot via CDP.</p>
+
+  <div class="card">
+    <div class="row">
+      <label>Token <input id="token" placeholder="optional" size="12" /></label>
+      <label>Host <input id="host" value="127.0.0.1" size="12" /></label>
+      <label>Port <input id="port" value="9222" size="6" /></label>
+      <label>Selector <input id="selector" value=".monaco-workbench" size="24" /></label>
+      <label>Contains <input id="contains" value="" size="10" /></label>
+    </div>
+    <div class="row">
+      <button id="btnClick">Click once</button>
+      <button id="btnStart">Start auto-click</button>
+      <button id="btnStop">Stop auto-click</button>
+      <button id="btnCapture">Capture static snapshot</button>
+      <button id="btnLatest">Open latest capture</button>
+    </div>
+    <div class="row hint">
+      <span id="status">Status: (loading…)</span>
+    </div>
+  </div>
+
+  <h2>Output</h2>
+  <pre id="log"></pre>
+
+<script>
+  const logEl = document.getElementById('log');
+  const tokenEl = document.getElementById('token');
+  const hostEl = document.getElementById('host');
+  const portEl = document.getElementById('port');
+  const selEl  = document.getElementById('selector');
+  const conEl  = document.getElementById('contains');
+  const statusEl = document.getElementById('status');
+
+  function log(obj) {
+    logEl.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  }
+
+  function payload() {
+    return {
+      host: hostEl.value.trim(),
+      port: Number(portEl.value),
+      selector: selEl.value.trim(),
+      contains: conEl.value.trim(),
+    };
+  }
+
+  function authHeaders() {
+    const t = tokenEl.value.trim();
+    return t ? { 'x-token': t } : {};
+  }
+
+  async function post(url, body) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    return await r.json();
+  }
+
+  document.getElementById('btnClick').onclick = async () => {
+    log('Running...');
+    const r = await post('/api/click', payload());
+    log(r);
+  };
+
+  document.getElementById('btnStart').onclick = async () => {
+    log('Starting auto-click...');
+    const body = { ...payload(), interval: 300 };
+    const r = await post('/api/click/start', body);
+    log(r);
+  };
+
+  document.getElementById('btnStop').onclick = async () => {
+    log('Stopping auto-click...');
+    const r = await post('/api/click/stop', {});
+    log(r);
+  };
+
+  document.getElementById('btnCapture').onclick = async () => {
+    log('Capturing...');
+    const r = await post('/api/capture', payload());
+    log(r);
+  };
+
+  document.getElementById('btnLatest').onclick = async () => {
+    const r = await fetch('/api/latest', { headers: authHeaders() }).then(r => r.json());
+    if (!r.latest) return log({ ok: true, latest: null });
+    window.open(r.url, '_blank');
+  };
+
+  async function refreshStatus() {
+    try {
+      const qs = new URLSearchParams({ host: hostEl.value.trim(), port: String(Number(portEl.value)) });
+      const r = await fetch('/api/status?' + qs.toString(), { headers: authHeaders() }).then(r => r.json());
+      const cdp = r?.cdp?.ok ? 'CDP: ok' : 'CDP: down';
+      const w = r?.watcherRunning ? 'auto-click: ON' : 'auto-click: off';
+      const latest = r?.latestUrl ? `latest: ${r.latestUrl}` : 'latest: (none)';
+      statusEl.textContent = `Status: ${cdp} | ${w} | ${latest}`;
+
+      // also pull watcher logs (tail)
+      const wstat = await fetch('/api/click/status', { headers: authHeaders() }).then(r => r.json());
+      if (wstat?.running) {
+        const combined = (wstat.stderrTail || '')
+          ? (wstat.stderrTail + "\n" + (wstat.stdoutTail || ''))
+          : (wstat.stdoutTail || '');
+        if (combined.trim()) logEl.textContent = combined;
+      }
+    } catch {
+      statusEl.textContent = 'Status: (error contacting server)';
+    }
+  }
+
+  // refresh every 2s
+  refreshStatus();
+  setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>
