@@ -58,6 +58,25 @@ function buildClickForwarderScript(token) {
       }
     }).catch(function() {});
   }, true);
+
+  function findScrollable(el) {
+    var node = el;
+    while (node && node !== document.documentElement) {
+      if (node.scrollHeight > node.clientHeight + 5 && node.clientHeight > 0) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  document.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var scrollable = findScrollable(e.target);
+    if (scrollable) {
+      scrollable.scrollTop += e.deltaY;
+      if (e.deltaX) scrollable.scrollLeft += e.deltaX;
+    } else if (window.parent !== window) {
+      window.parent.postMessage({ type: 'cursor-auto-scroll', deltaX: e.deltaX, deltaY: e.deltaY }, '*');
+    }
+  }, { passive: false, capture: true });
 })();
 </script>`;
 }
@@ -123,18 +142,107 @@ function buildResMap(tree) {
   return resMap;
 }
 
+function simpleHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * Shared: inline <link> stylesheets + rewrite <style> URLs in a cheerio $.
+ * Mutates $ in place. Returns { cssCacheHit, cssFetched }.
+ */
+async function processPageCss($, { resolveUrl, getResourceContent, pageUrl, proxyBase, cssCache, cssTtl }) {
+  const links = $('link[rel="stylesheet"]').toArray();
+  let cssCacheHit = 0, cssFetched = 0;
+  for (const el of links) {
+    const href = $(el).attr('href');
+    const abs = resolveUrl(href);
+    if (!abs) continue;
+    if (cssCache) {
+      const cached = cssCache.get(abs);
+      if (cached && (Date.now() - cached.at) < cssTtl) {
+        $(el).replaceWith(`<style data-inlined-from="${escapeHtml(abs)}">\n${cached.rewritten}\n</style>`);
+        cssCacheHit++;
+        continue;
+      }
+    }
+    const res = await getResourceContent(abs);
+    if (res && (res.mimeType?.includes('css') || res.type === 'Stylesheet')) {
+      const css = res.base64Encoded
+        ? Buffer.from(res.content, 'base64').toString('utf8')
+        : res.content;
+      const rewritten = rewriteCssUrls(css, abs, proxyBase);
+      if (cssCache) cssCache.set(abs, { rewritten, at: Date.now() });
+      $(el).replaceWith(`<style data-inlined-from="${escapeHtml(abs)}">\n${rewritten}\n</style>`);
+      cssFetched++;
+    }
+  }
+  $('style').each((_, el) => {
+    if ($(el).attr('data-inlined-from')) return;
+    const original = $(el).html() || '';
+    const rewritten = rewriteCssUrls(original, pageUrl, proxyBase);
+    if (rewritten !== original) $(el).html(rewritten);
+  });
+  return { cssCacheHit, cssFetched };
+}
+
+/**
+ * Build CDP helpers (resolveUrl, getResourceContent) from page/client/resMap.
+ */
+function makeCdpHelpers(page, client, resMap) {
+  const pageUrl = page.url();
+  const resolveUrl = (raw) => {
+    if (!raw) return null;
+    try { return new URL(raw, pageUrl).toString(); } catch { return raw; }
+  };
+  const getResourceContent = async (absUrl) => {
+    const meta = resMap.get(absUrl);
+    if (!meta) return null;
+    try {
+      const { content, base64Encoded } = await client.send('Page.getResourceContent', {
+        frameId: meta.frameId, url: absUrl,
+      });
+      return { content, base64Encoded, mimeType: meta.mimeType, type: meta.type };
+    } catch { return null; }
+  };
+  return { pageUrl, resolveUrl, getResourceContent };
+}
+
+/**
+ * Extract all inlined+rewritten CSS as a single string + hash.
+ * Used by chat-content endpoint (doesn't need the full page HTML).
+ */
+async function extractPageStyles(page, client, opts = {}) {
+  const proxyBase = opts.proxyBase || '/api/vscode-file';
+  const cssCache = opts.cssCache || null;
+  const cssTtl = opts.cssTtl || 5 * 60 * 1000;
+
+  let resMap = opts.resMap || null;
+  if (!resMap) {
+    const tree = await client.send('Page.getResourceTree');
+    resMap = buildResMap(tree);
+  }
+
+  const { pageUrl, resolveUrl, getResourceContent } = makeCdpHelpers(page, client, resMap);
+  const dom = await page.content();
+  const $ = cheerio.load(dom, { decodeEntities: false });
+
+  await processPageCss($, { resolveUrl, getResourceContent, pageUrl, proxyBase, cssCache, cssTtl });
+
+  const parts = [];
+  $('style').each((_, el) => {
+    const text = $(el).html() || '';
+    if (text.trim()) parts.push(text);
+  });
+  const styles = parts.join('\n');
+  return { $, styles, stylesHash: simpleHash(styles), pageUrl, resMap };
+}
+
 /**
  * Render a live snapshot HTML from a CDP page.
- *
- * @param {object} page      - Playwright page (connected via CDP)
- * @param {object} client    - CDP session (from context.newCDPSession)
- * @param {object} opts
- * @param {string} opts.proxyBase  - e.g. '/api/vscode-file'
- * @param {string} [opts.token]    - auth token for click forwarder
- * @param {Map}    [opts.cssCache] - shared cache: url → { rewritten, at }
- * @param {number} [opts.cssTtl]   - cache TTL in ms (default 5 min)
- * @param {Map}    [opts.resMap]   - pre-built resource map (skips getResourceTree)
- * @returns {Promise<{html: string, resMap: Map}>}
  */
 async function renderLive(page, client, opts = {}) {
   const _t = { start: Date.now() };
@@ -149,68 +257,20 @@ async function renderLive(page, client, opts = {}) {
     resMap = buildResMap(tree);
   }
 
-  const pageUrl = page.url();
-
-  const resolveUrl = (raw) => {
-    if (!raw) return null;
-    try { return new URL(raw, pageUrl).toString(); } catch { return raw; }
-  };
-
-  const getResourceContent = async (absUrl) => {
-    const meta = resMap.get(absUrl);
-    if (!meta) return null;
-    try {
-      const { content, base64Encoded } = await client.send('Page.getResourceContent', {
-        frameId: meta.frameId, url: absUrl,
-      });
-      return { content, base64Encoded, mimeType: meta.mimeType, type: meta.type };
-    } catch { return null; }
-  };
+  const { pageUrl, resolveUrl, getResourceContent } = makeCdpHelpers(page, client, resMap);
 
   _t.preContent = Date.now();
   const dom = await page.content();
   _t.content = Date.now();
   const $ = cheerio.load(dom, { decodeEntities: false });
-
   _t.cheerio = Date.now();
 
   $('meta[http-equiv="Content-Security-Policy"]').remove();
 
-  const links = $('link[rel="stylesheet"]').toArray();
-  let cssCacheHit = 0, cssFetched = 0;
-  for (const el of links) {
-    const href = $(el).attr('href');
-    const abs = resolveUrl(href);
-    if (!abs) continue;
-
-    if (cssCache) {
-      const cached = cssCache.get(abs);
-      if (cached && (Date.now() - cached.at) < cssTtl) {
-        $(el).replaceWith(`<style data-inlined-from="${escapeHtml(abs)}">\n${cached.rewritten}\n</style>`);
-        cssCacheHit++;
-        continue;
-      }
-    }
-
-    const res = await getResourceContent(abs);
-    if (res && (res.mimeType?.includes('css') || res.type === 'Stylesheet')) {
-      const css = res.base64Encoded
-        ? Buffer.from(res.content, 'base64').toString('utf8')
-        : res.content;
-      const rewritten = rewriteCssUrls(css, abs, proxyBase);
-      if (cssCache) cssCache.set(abs, { rewritten, at: Date.now() });
-      $(el).replaceWith(`<style data-inlined-from="${escapeHtml(abs)}">\n${rewritten}\n</style>`);
-      cssFetched++;
-    }
-  }
-  _t.css = Date.now();
-
-  $('style').each((_, el) => {
-    if ($(el).attr('data-inlined-from')) return;
-    const original = $(el).html() || '';
-    const rewritten = rewriteCssUrls(original, pageUrl, proxyBase);
-    if (rewritten !== original) $(el).html(rewritten);
+  const { cssCacheHit, cssFetched } = await processPageCss($, {
+    resolveUrl, getResourceContent, pageUrl, proxyBase, cssCache, cssTtl,
   });
+  _t.css = Date.now();
   _t.styleRewrite = Date.now();
 
   const rewriteAttrUrl = makeAttrRewriter(pageUrl, proxyBase);
@@ -229,12 +289,11 @@ async function renderLive(page, client, opts = {}) {
   const outHtml = $.html({ decodeEntities: false });
   _t.serialize = Date.now();
 
-  console.log('[render] content=%dms cheerio=%dms css=%dms(%d cached/%d fetched) style=%dms attr=%dms serialize=%dms TOTAL=%dms dom=%dKB out=%dKB',
+  console.log('[render] content=%dms cheerio=%dms css=%dms(%d cached/%d fetched) attr=%dms serialize=%dms TOTAL=%dms dom=%dKB out=%dKB',
     _t.content - _t.preContent,
     _t.cheerio - _t.content,
     _t.css - _t.cheerio, cssCacheHit, cssFetched,
-    _t.styleRewrite - _t.css,
-    _t.attrRewrite - _t.styleRewrite,
+    _t.attrRewrite - _t.css,
     _t.serialize - _t.attrRewrite,
     _t.serialize - _t.start,
     (dom.length / 1024) | 0,
@@ -243,4 +302,7 @@ async function renderLive(page, client, opts = {}) {
   return { html: outHtml, resMap };
 }
 
-module.exports = { renderLive, buildResMap, escapeHtml, buildClickForwarderScript };
+module.exports = {
+  renderLive, buildResMap, escapeHtml, buildClickForwarderScript,
+  extractPageStyles, makeAttrRewriter,
+};

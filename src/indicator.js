@@ -11,6 +11,8 @@
  */
 
 const INDICATOR_ID = '__cursor_auto_scan_indicator';
+const HEARTBEAT_TIMEOUT_MS = 15000;
+const HEARTBEAT_CHECK_MS = 5000;
 
 const INDICATOR_CSS = [
   '@keyframes __ca_spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}',
@@ -65,9 +67,10 @@ const INDICATOR_CSS = [
 ].join('');
 
 async function inject(page, initialMode = 'watch') {
-  return await page.evaluate(({ id, css, mode }) => {
+  return await page.evaluate(({ id, css, mode, hbTimeout, hbCheck }) => {
     document.getElementById(id)?.remove();
     document.getElementById(id + '_style')?.remove();
+    if (window.__ca_watchdog) clearInterval(window.__ca_watchdog);
 
     const style = document.createElement('style');
     style.id = id + '_style';
@@ -79,6 +82,18 @@ async function inject(page, initialMode = 'watch') {
     container.dataset.state = 'scanning';
     container.dataset.mode = mode;
     container.dataset.paused = 'false';
+    container.dataset.hb = String(Date.now());
+
+    window.__ca_watchdog = setInterval(() => {
+      const el = document.getElementById(id);
+      if (!el) { clearInterval(window.__ca_watchdog); return; }
+      const last = parseInt(el.dataset.hb || '0', 10);
+      if (Date.now() - last > hbTimeout) {
+        el.remove();
+        document.getElementById(id + '_style')?.remove();
+        clearInterval(window.__ca_watchdog);
+      }
+    }, hbCheck);
 
     const sw = document.createElement('button');
     sw.className = '__sw';
@@ -142,7 +157,7 @@ async function inject(page, initialMode = 'watch') {
       return { ok: true };
     }
     return { ok: false, reason: 'titlebar not found' };
-  }, { id: INDICATOR_ID, css: INDICATOR_CSS, mode: initialMode });
+  }, { id: INDICATOR_ID, css: INDICATOR_CSS, mode: initialMode, hbTimeout: HEARTBEAT_TIMEOUT_MS, hbCheck: HEARTBEAT_CHECK_MS });
 }
 
 async function update(page, state, text) {
@@ -150,6 +165,7 @@ async function update(page, state, text) {
     const el = document.getElementById(id);
     if (!el) return;
     el.dataset.state = state;
+    el.dataset.hb = String(Date.now());
     const lbl = el.querySelector('.__lb');
     if (lbl) lbl.textContent = text || 'scan';
   }, { id: INDICATOR_ID, state, text });
@@ -187,6 +203,35 @@ async function setMode(page, mode) {
   }, { id: INDICATOR_ID, mode });
 }
 
+async function poll(page) {
+  return await page.evaluate((id) => {
+    const el = document.getElementById(id);
+    if (!el) return { exists: false, paused: false, mode: 'watch' };
+    el.dataset.hb = String(Date.now());
+    return {
+      exists: true,
+      paused: el.dataset.paused === 'true',
+      mode: el.dataset.mode || 'watch',
+    };
+  }, INDICATOR_ID);
+}
+
+async function peek(page) {
+  return await page.evaluate((id) => {
+    const el = document.getElementById(id);
+    if (!el) return { exists: false };
+    const hb = parseInt(el.dataset.hb || '0', 10);
+    return {
+      exists: true,
+      state: el.dataset.state || 'unknown',
+      mode: el.dataset.mode || 'watch',
+      paused: el.dataset.paused === 'true',
+      label: el.querySelector('.__lb')?.textContent || '',
+      hbAgeMs: Date.now() - hb,
+    };
+  }, INDICATOR_ID);
+}
+
 async function getPaused(page) {
   return await page.evaluate((id) => {
     const el = document.getElementById(id);
@@ -209,4 +254,4 @@ async function setPaused(page, paused) {
   }, { id: INDICATOR_ID, paused });
 }
 
-module.exports = { inject, update, remove, getMode, setMode, getPaused, setPaused, INDICATOR_ID };
+module.exports = { inject, update, remove, poll, peek, getMode, setMode, getPaused, setPaused, INDICATOR_ID };

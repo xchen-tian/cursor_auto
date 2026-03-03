@@ -163,7 +163,10 @@ Express 5 服务器。环境变量：`PORT`(5123)、`BIND`(0.0.0.0)、`CURSOR_AU
 | generating | 绿色(慢) | 1.2s | AI 生成中 |
 | clicked | 绿色(快) | 0.6s | 已点击 Run |
 
-API: `inject(page)`, `update(page, state, text)`, `remove(page)`
+API: `inject(page)`, `update(page, state, text)`, `remove(page)`, `poll(page)`, `peek(page)`, `getMode(page)`, `setMode(page, mode)`, `getPaused(page)`, `setPaused(page, paused)`
+
+`peek(page)` 是只读版本的 `poll()`，**不写 heartbeat**，返回 `{ exists, state, mode, paused, label, hbAgeMs }`。
+server.js 必须用 `peek()` 而非 `poll()` 来读状态，否则会"续命"已死的 indicator。
 
 ### `src/get_resource_path.js` — 应用根目录发现
 
@@ -194,9 +197,12 @@ API: `inject(page)`, `update(page, state, text)`, `remove(page)`
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/click` | 单次点击 |
-| POST | `/api/click/start` | 启动持续监控（单例） |
-| POST | `/api/click/stop` | 停止监控 |
-| GET | `/api/click/status` | 获取监控状态和日志尾部 |
+| POST | `/api/click/start` | 启动持续监控（单例），支持 `mode: "watch"\|"scan"` |
+| POST | `/api/click/stop` | 停止监控（杀子进程 + 移除 indicator DOM） |
+| GET | `/api/click/status` | 获取监控状态、日志尾部、indicator 状态、active/source |
+| GET | `/api/click/indicator` | 只读读取 indicator DOM 状态（不刷新 heartbeat） |
+| POST | `/api/click/mode` | 切换 watch/scan 模式（`{ mode: "watch"\|"scan" }`） |
+| POST | `/api/click/pause` | 暂停/恢复（`{ paused: true\|false }`） |
 | POST | `/api/remote-click` | Live View iframe 内点击转发 |
 
 ### Composer 输入
@@ -205,6 +211,12 @@ API: `inject(page)`, `update(page, state, text)`, `remove(page)`
 |------|------|------|
 | POST | `/api/composer/insert` | 向 Composer 输入框插入文字（CDP Input.insertText） |
 | POST | `/api/composer/send` | 按 Enter 发送当前 Composer 内容 |
+
+### Live View 交互
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/remote-scroll` | Live View 滚动事件转发（CDP Input.dispatchMouseEvent mouseWheel） |
 
 ### 快照相关
 
@@ -227,15 +239,14 @@ API: `inject(page)`, `update(page, state, text)`, `remove(page)`
 
 这些是 Cursor Electron 界面中使用到的 DOM 选择器，**可能随 Cursor 版本更新而变化**：
 
+### 通用选择器
+
 | 选择器 | 用途 |
 |--------|------|
 | `.monaco-workbench` | 主 Workbench 容器（用于定位页面） |
-| `.composer-run-button` | Composer Run/Fetch 按钮 |
-| `.ui-tool-call-line-shimmer` | 工具调用行 shimmer 动画 |
-| `.ui-task-tool-call__shimmer` | 任务工具调用 shimmer |
-| `.ui-collapsible-shimmer` | 可折叠区域 shimmer |
-| `.composer-bar[data-composer-status]` | Composer 状态栏 |
-| `.composer-tool-call-top-header` | 工具调用顶部标题 |
+| `.composer-run-button` | Composer Run/Fetch 按钮（普通模式文字 "Fetch"，Agent 模式文字 "Run⏎"） |
+| `.composer-bar[data-composer-status]` | Composer 状态栏（值：generating / cancelled / completed） |
+| `.composer-tool-call-top-header` | 工具调用顶部标题（"Running command:" / "Ran command:" / "Run command:"） |
 | `.composer-unified-dropdown-model` | 模型选择下拉框 |
 | `.composer-unified-dropdown-item[data-is-model]` | 下拉框中的模型项 |
 | `.composer-create-plan-build-button` | Build/Plan 按钮 |
@@ -243,6 +254,29 @@ API: `inject(page)`, `update(page, state, text)`, `remove(page)`
 | `.aislash-editor-input` | Composer 文本输入框（Lexical contenteditable） |
 | `.titlebar-right` | 标题栏右侧（指示器注入点） |
 | `[data-click-ready="true"]` | 按钮就绪标记 |
+
+### 普通 Composer 模式 Shimmer 选择器
+
+| 选择器 | 用途 |
+|--------|------|
+| `.ui-tool-call-line-shimmer` | 工具调用行 shimmer 动画 |
+| `.ui-task-tool-call__shimmer` | 任务工具调用 shimmer |
+| `.ui-collapsible-shimmer` | 可折叠区域 shimmer |
+
+### Agent 模式选择器
+
+| 选择器 | 用途 |
+|--------|------|
+| `body.agent-unification-enabled` | Agent 模式已启用（body class） |
+| `.composer-unified-dropdown[data-mode="agent"]` | 下拉框显示 Agent 模式 |
+| `.composer-skip-button` | Agent 审批跳过按钮（text: "Skip"） |
+| `.composer-tool-call-allowlist-button` | Agent 工具白名单按钮（text: "Use Allowlist"） |
+| `.view-allow-btn-container .anysphere-button` | Agent 工具调用 Allow 按钮（text: "Allow"） |
+| `.ui-shell-tool-call__prompt--loading` | Agent shell 工具调用 loading 动画 |
+| `.ui-edit-tool-call__filename--loading` | Agent 编辑工具调用 loading 动画 |
+| `[data-tool-status]` | Agent 工具调用状态（值：loading / completed） |
+| `[data-tool-call-id]` | Agent 工具调用 ID |
+| `.composer-tool-call-container` | Agent 工具调用容器 |
 
 ---
 

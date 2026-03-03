@@ -6,8 +6,9 @@ const zlib = require('zlib');
 const express = require('express');
 const { spawn } = require('child_process');
 const mime = require('mime-types');
-const { connectOverCDP, findPageWithSelector } = require('./cdp');
-const { renderLive, buildResMap } = require('./live_render');
+const { connectOverCDP, findPageWithSelector, sleep } = require('./cdp');
+const { renderLive, buildResMap, extractPageStyles, makeAttrRewriter } = require('./live_render');
+const cheerio = require('cheerio');
 
 // Node >= 18 provides global fetch.
 
@@ -128,7 +129,7 @@ async function main() {
 
   // Start long-running auto-click loop (one watcher at a time)
   app.post('/api/click/start', async (req, res) => {
-    const { host='127.0.0.1', port=9222, selector='.composer-run-button', contains='Fetch', requireReady=true, interval=300 } = req.body || {};
+    const { host='127.0.0.1', port=9222, selector='.composer-run-button', contains='Fetch', requireReady=true, interval=300, mode='watch' } = req.body || {};
     if (watcher.child) {
       return res.status(409).json({ ok: false, error: 'watcher_already_running', startedAt: watcher.startedAt, params: watcher.params });
     }
@@ -143,6 +144,15 @@ async function main() {
       });
     }
 
+    // Check if an external auto_click already has an indicator running
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      const ind = await indicator.peek(state.page);
+      if (ind.exists && ind.hbAgeMs < 15000) {
+        return res.status(409).json({ ok: false, error: 'indicator_already_active', indicator: ind });
+      }
+    } catch {}
+
     const script = path.join(__dirname, 'auto_click.js');
     const args = [
       '--host', String(host),
@@ -151,13 +161,14 @@ async function main() {
       '--interval', String(interval),
       '--verbose'
     ];
+    if (mode === 'scan') args.push('--scan-tabs');
     if (contains) args.push('--contains', contains);
     if (!requireReady) args.push('--require-ready=false');
 
     const child = spawnNodeLong(script, args);
     watcher.child = child;
     watcher.startedAt = Date.now();
-    watcher.params = { host, port, selector, contains, requireReady, interval };
+    watcher.params = { host, port, selector, contains, requireReady, interval, mode };
     watcher.out = '';
     watcher.err = '';
     child.stdout.on('data', (d) => watcher.out += d.toString());
@@ -170,19 +181,87 @@ async function main() {
     res.json({ ok: true, startedAt: watcher.startedAt, params: watcher.params });
   });
 
-  app.post('/api/click/stop', (req, res) => {
-    res.json(stopWatcher());
+  app.post('/api/click/stop', async (req, res) => {
+    const { host='127.0.0.1', port=9222 } = req.body || {};
+    const processResult = stopWatcher();
+
+    // Also remove indicator DOM so externally-started auto_click will exit
+    let indicatorRemoved = false;
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      const r = await indicator.remove(state.page);
+      indicatorRemoved = r?.removed || false;
+    } catch {}
+
+    res.json({ ...processResult, indicatorRemoved });
   });
 
-  app.get('/api/click/status', (req, res) => {
+  app.get('/api/click/status', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9222);
+
+    let ind = { exists: false };
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      ind = await indicator.peek(state.page);
+    } catch {}
+
+    const indicatorAlive = ind.exists && ind.hbAgeMs < 15000;
     res.json({
       ok: true,
+      active: !!watcher.child || indicatorAlive,
+      source: watcher.child ? 'server' : indicatorAlive ? 'external' : null,
       running: !!watcher.child,
       startedAt: watcher.startedAt,
       params: watcher.params,
+      indicator: ind,
       stdoutTail: tailLines(watcher.out, 200),
       stderrTail: tailLines(watcher.err, 200),
     });
+  });
+
+  // GET /api/click/indicator — read-only indicator state (does NOT refresh heartbeat)
+  app.get('/api/click/indicator', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9222);
+
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      const ind = await indicator.peek(state.page);
+      res.json({ ok: true, ...ind });
+    } catch (e) {
+      res.json({ ok: true, exists: false, cdpError: String(e?.message || e) });
+    }
+  });
+
+  // POST /api/click/mode — switch watch/scan mode on running indicator
+  app.post('/api/click/mode', async (req, res) => {
+    const { host='127.0.0.1', port=9222, mode } = req.body || {};
+    if (mode !== 'watch' && mode !== 'scan') {
+      return res.status(400).json({ ok: false, error: 'mode must be "watch" or "scan"' });
+    }
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      await indicator.setMode(state.page, mode);
+      res.json({ ok: true, mode });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  // POST /api/click/pause — pause or resume running indicator
+  app.post('/api/click/pause', async (req, res) => {
+    const { host='127.0.0.1', port=9222, paused } = req.body || {};
+    if (typeof paused !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'paused must be a boolean' });
+    }
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      await indicator.setPaused(state.page, paused);
+      res.json({ ok: true, paused });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
   });
 
   app.post('/api/capture', async (req, res) => {
@@ -411,6 +490,46 @@ async function main() {
     }
   });
 
+  // POST /api/remote-scroll — forward wheel events via CDP + direct scrollTop
+  app.post('/api/remote-scroll', async (req, res) => {
+    const { host='127.0.0.1', port=9222, x=0, y=0, deltaX=0, deltaY=0 } = req.body || {};
+
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+
+      // Strategy 1: CDP mouseWheel for general page elements (editor, sidebar, etc.)
+      await state.client.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x: Number(x),
+        y: Number(y),
+        deltaX: Number(deltaX),
+        deltaY: Number(deltaY),
+      });
+
+      // Strategy 2: Direct scrollTop manipulation for composer conversation area.
+      // Monaco's custom scrollable elements intercept native wheel events,
+      // so CDP mouseWheel may not reliably scroll the conversation.
+      if (deltaY !== 0) {
+        await state.page.evaluate(({ dy }) => {
+          const scrollables = document.querySelectorAll(
+            '.composer-messages-container .monaco-scrollable-element > div'
+          );
+          for (const el of scrollables) {
+            if (el.scrollHeight > el.clientHeight) {
+              el.scrollTop += dy;
+            }
+          }
+        }, { dy: Number(deltaY) });
+      }
+
+      res.json({ ok: true });
+    } catch (e) {
+      console.log('[remote-scroll] error:', e.message);
+      resetLiveCDP();
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Composer text insertion API (CDP Input.insertText + dispatchKeyEvent)
   // ---------------------------------------------------------------------------
@@ -503,6 +622,173 @@ async function main() {
       res.json({ ok: true });
     } catch (e) {
       console.log('[composer/send] error:', e.message);
+      resetLiveCDP();
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Chat View API — tab list + conversation content extraction
+  // ---------------------------------------------------------------------------
+
+  const chatStylesCache = { styles: null, hash: null, at: 0 };
+  const CHAT_STYLES_TTL = 5 * 60 * 1000;
+
+  app.get('/api/chat-tabs', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9222);
+    const mode = String(req.query.mode || 'agent');
+
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+      const tabs = await state.page.evaluate((mode) => {
+        if (mode === 'agent') {
+          const rows = document.querySelectorAll('.agent-sidebar-cell[data-selected]');
+          return Array.from(rows).slice(0, 5)
+            .map((r, i) => ({
+              index: i,
+              title: (r.querySelector('.agent-sidebar-cell-text')?.textContent || '').trim(),
+              selected: r.dataset.selected === 'true',
+            }))
+            .filter(t => t.title.length > 0 && t.title !== 'More');
+        }
+        const filter = (t) => {
+          if (t.closest('.tabs-container')) return false;
+          if (t.closest('.panel .composite-bar')) return false;
+          if (t.closest('.composite.bar')) return false;
+          if (t.closest('.activitybar')) return false;
+          return true;
+        };
+        return Array.from(document.querySelectorAll('[role="tab"]'))
+          .filter(filter)
+          .map((t, i) => ({
+            index: i,
+            title: (t.getAttribute('aria-label') || t.textContent || '').trim().substring(0, 60),
+            selected: t.getAttribute('aria-selected') === 'true',
+          }));
+      }, mode);
+      res.json({ ok: true, mode, tabs });
+    } catch (e) {
+      console.log('[chat-tabs] error:', e.message);
+      resetLiveCDP();
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/chat-content', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9222);
+    const mode = String(req.query.mode || 'agent');
+    const tab = Number(req.query.tab ?? -1);
+    const needStyles = req.query.needStyles === '1';
+    const clientHash = String(req.query.stylesHash || '');
+
+    try {
+      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+
+      if (tab >= 0) {
+        const switched = await state.page.evaluate(({ mode, idx }) => {
+          if (mode === 'agent') {
+            const rows = Array.from(document.querySelectorAll('.agent-sidebar-cell[data-selected]'))
+              .slice(0, 5)
+              .filter(r => {
+                const t = (r.querySelector('.agent-sidebar-cell-text')?.textContent || '').trim();
+                return t.length > 0 && t !== 'More';
+              });
+            if (idx >= rows.length) return { ok: false, reason: 'out_of_range' };
+            if (rows[idx].dataset.selected === 'true') return { ok: true, alreadySelected: true };
+            rows[idx].scrollIntoView({ block: 'center' });
+            rows[idx].click();
+            return { ok: true, alreadySelected: false };
+          }
+          const filter = (t) => {
+            if (t.closest('.tabs-container')) return false;
+            if (t.closest('.panel .composite-bar')) return false;
+            if (t.closest('.composite.bar')) return false;
+            if (t.closest('.activitybar')) return false;
+            return true;
+          };
+          const tabs = Array.from(document.querySelectorAll('[role="tab"]')).filter(filter);
+          if (idx >= tabs.length) return { ok: false, reason: 'out_of_range' };
+          if (tabs[idx].getAttribute('aria-selected') === 'true') return { ok: true, alreadySelected: true };
+          tabs[idx].click();
+          return { ok: true, alreadySelected: false };
+        }, { mode, idx: tab });
+
+        if (!switched.ok) {
+          return res.status(400).json({ ok: false, error: switched.reason || 'switch failed' });
+        }
+        if (!switched.alreadySelected) {
+          await sleep(500);
+        }
+      }
+
+      const resMap = await ensureResMap(state);
+      const proxyBase = '/api/vscode-file';
+
+      let styles = null;
+      let stylesHash = null;
+      const now = Date.now();
+      if (needStyles || !clientHash || (chatStylesCache.hash && clientHash !== chatStylesCache.hash)) {
+        if (chatStylesCache.styles && (now - chatStylesCache.at) < CHAT_STYLES_TTL && !needStyles) {
+          styles = chatStylesCache.styles;
+          stylesHash = chatStylesCache.hash;
+        } else {
+          const extracted = await extractPageStyles(state.page, state.client, {
+            proxyBase, cssCache: liveState.cssCache, cssTtl: CSS_TTL, resMap,
+          });
+          styles = extracted.styles;
+          stylesHash = extracted.stylesHash;
+          chatStylesCache.styles = styles;
+          chatStylesCache.hash = stylesHash;
+          chatStylesCache.at = now;
+        }
+      } else {
+        stylesHash = chatStylesCache.hash || clientHash;
+      }
+
+      // Extract theme classes + inline CSS vars from Cursor DOM
+      const themeInfo = await state.page.evaluate(() => {
+        return {
+          htmlClass: document.documentElement.className || '',
+          bodyClass: document.body?.className || '',
+          htmlStyle: document.documentElement.getAttribute('style') || '',
+          bodyStyle: document.body?.getAttribute('style') || '',
+          wbStyle: document.querySelector('.monaco-workbench')?.getAttribute('style') || '',
+        };
+      });
+
+      const pageUrl = state.page.url();
+      const dom = await state.page.content();
+      const $ = cheerio.load(dom, { decodeEntities: false });
+
+      const container = $('.composer-messages-container');
+      if (!container.length) {
+        return res.json({ ok: true, html: '', styles, stylesHash, empty: true });
+      }
+
+      const rewriteAttrUrl = makeAttrRewriter(pageUrl, proxyBase);
+      container.find('[src], [href]').each((_, el) => {
+        for (const attr of ['src', 'href']) {
+          const raw = $(el).attr(attr);
+          if (!raw) continue;
+          const r = rewriteAttrUrl(raw);
+          if (r) $(el).attr(attr, r);
+        }
+      });
+      container.find('script').remove();
+      container.find('[onclick],[onload],[onerror],[onmouseover]').each((_, el) => {
+        $(el).removeAttr('onclick').removeAttr('onload').removeAttr('onerror').removeAttr('onmouseover');
+      });
+
+      const html = container.html() || '';
+      const result = { ok: true, html, stylesHash, themeInfo };
+      if (styles !== null) result.styles = styles;
+      console.log('[chat-content] mode=%s tab=%d html=%dKB styles=%s', mode, tab,
+        (html.length / 1024) | 0, styles ? ((styles.length / 1024) | 0) + 'KB' : 'cached');
+      res.json(result);
+    } catch (e) {
+      console.log('[chat-content] error:', e.message);
       resetLiveCDP();
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }

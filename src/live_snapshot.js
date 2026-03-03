@@ -76,6 +76,25 @@ function buildClickForwarderScript(token, proxyBase) {
       body: JSON.stringify({ selector: sel, requireReady: false })
     }).catch(function() {});
   }, true);
+
+  function findScrollable(el) {
+    var node = el;
+    while (node && node !== document.documentElement) {
+      if (node.scrollHeight > node.clientHeight + 5 && node.clientHeight > 0) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  document.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var scrollable = findScrollable(e.target);
+    if (scrollable) {
+      scrollable.scrollTop += e.deltaY;
+      if (e.deltaX) scrollable.scrollLeft += e.deltaX;
+    } else if (window.parent !== window) {
+      window.parent.postMessage({ type: 'cursor-auto-scroll', deltaX: e.deltaX, deltaY: e.deltaY }, '*');
+    }
+  }, { passive: false, capture: true });
 })();
 </script>`;
 }

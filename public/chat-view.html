@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chat View — cursor_auto</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { display:flex; flex-direction:column; height:100vh; margin:0; background:#181818; color:#e4e4e4;
+           font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; font-size:14px; overflow:hidden; }
+    a { color:#5b9bf0; }
+
+    #topBar { flex-shrink:0; display:flex; align-items:center; gap:10px; padding:0 12px; height:40px;
+              background:#222; border-bottom:1px solid #333; font-size:13px; overflow-x:auto; white-space:nowrap; }
+    #topBar button, #topBar select { padding:4px 10px; border-radius:6px; border:1px solid #555; background:#333;
+                                     color:#ddd; cursor:pointer; font-size:12px; }
+    #topBar button:hover { background:#444; }
+    .mode-btn { opacity:.5; }
+    .mode-btn.active { opacity:1; border-color:#3b7dd8; background:#2a3a55; }
+
+    #tabBar { flex-shrink:0; display:flex; gap:0; background:#222; border-bottom:1px solid #333;
+              overflow-x:auto; scrollbar-width:thin; min-height:36px; }
+    .tab-btn { flex-shrink:0; padding:8px 16px; border:none; border-bottom:2px solid transparent;
+               background:transparent; color:#888; cursor:pointer; font-size:13px; white-space:nowrap;
+               max-width:200px; overflow:hidden; text-overflow:ellipsis; }
+    .tab-btn:hover { color:#ccc; background:#2a2a2a; }
+    .tab-btn.active { color:#fff; border-bottom-color:#3b7dd8; }
+
+    #chatFrame { flex:1; min-height:0; border:none; width:100%; }
+
+    #promptArea { flex-shrink:0; border-top:1px solid #333; background:#1e1e1e; }
+    #promptInner { display:flex; gap:8px; max-width:min(900px,100%); margin:0 auto; padding:8px 12px; align-items:flex-end; }
+    #promptInput { flex:1; resize:vertical; background:#252525; color:#e4e4e4; border:1px solid #444;
+                   border-radius:10px; padding:8px 10px; font:14px/1.4 system-ui,-apple-system,sans-serif;
+                   min-height:38px; max-height:200px; outline:none; }
+    #promptInput:focus { border-color:#3b7dd8; }
+    #btnSend { align-self:flex-end; padding:8px 18px; border-radius:10px; border:1px solid #3b7dd8;
+               background:#2a3a55; color:#ddd; cursor:pointer; font-size:14px; white-space:nowrap; }
+    #btnSend:hover { background:#3b5588; }
+    #btnSend:disabled { opacity:.4; cursor:default; }
+    #sendStatus { font-size:11px; color:#888; align-self:center; white-space:nowrap; }
+
+    #statusBar { flex-shrink:0; height:24px; display:flex; align-items:center; padding:0 12px;
+                 background:#222; border-top:1px solid #333; font-size:11px; color:#777; }
+  </style>
+</head>
+<body>
+  <div id="topBar">
+    <a href="/" style="text-decoration:none;color:#999;font-size:13px">&lt; Dashboard</a>
+    <strong>Chat View</strong>
+    <button class="mode-btn active" data-mode="agent">Agent</button>
+    <button class="mode-btn" data-mode="editor">Editor</button>
+    <span style="color:#555">|</span>
+    <label style="color:#999">Refresh
+      <select id="refreshSec">
+        <option value="1">1s</option>
+        <option value="2">2s</option>
+        <option value="3" selected>3s</option>
+        <option value="5">5s</option>
+        <option value="0">Manual</option>
+      </select>
+    </label>
+    <button id="btnRefresh">Refresh Now</button>
+  </div>
+
+  <div id="tabBar"></div>
+
+  <iframe id="chatFrame"></iframe>
+
+  <div id="promptArea">
+    <div id="promptInner">
+      <textarea id="promptInput" rows="2" placeholder="Enter to send, Shift+Enter for newline"></textarea>
+      <button id="btnSend">Send</button>
+      <span id="sendStatus"></span>
+    </div>
+  </div>
+
+  <div id="statusBar"><span id="statusText">Loading...</span></div>
+
+<script>
+(function() {
+  const tabBarEl = document.getElementById('tabBar');
+  const chatFrame = document.getElementById('chatFrame');
+  const promptInput = document.getElementById('promptInput');
+  const btnSend = document.getElementById('btnSend');
+  const sendStatus = document.getElementById('sendStatus');
+  const statusText = document.getElementById('statusText');
+  const refreshSecSel = document.getElementById('refreshSec');
+
+  let currentMode = 'agent';
+  let currentTab = -1;
+  let tabs = [];
+  let cachedStyles = '';
+  let cachedStylesHash = '';
+  let refreshTimer = null;
+  let sending = false;
+  let inflight = false;
+
+  const scrollAnchors = new Map();
+
+  const RESPONSIVE_CSS = `
+    html, body { margin:0; padding:0; background:#181818; overflow:auto; height:auto; width:auto;
+                 font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; user-select:auto; }
+    #cv-root { width:min(900px,100%); margin:0 auto; padding:clamp(10px,2.5vw,18px); padding-bottom:40px; }
+    #cv-root * { box-sizing:border-box; }
+    #cv-root [style*="max-width"] { max-width:100%!important; width:100%!important; }
+    #cv-root .composer-human-message,
+    #cv-root .composer-rendered-message,
+    #cv-root .composer-human-ai-pair-container,
+    #cv-root .composer-human-message-container,
+    #cv-root .composer-code-block-container { width:100%!important; max-width:100%!important; }
+    .markdown-section { overflow-wrap:anywhere; word-break:break-word; }
+    pre { max-width:100%; overflow-x:auto; }
+    table { display:block; max-width:100%; overflow-x:auto; }
+    img, svg { max-width:100%; height:auto; }
+  `;
+
+  function authHeaders() {
+    const t = new URLSearchParams(location.search).get('token') || '';
+    return t ? { 'x-token': t } : {};
+  }
+  async function fetchJson(url) {
+    return (await fetch(url, { headers: authHeaders() })).json();
+  }
+  async function postJson(url, body) {
+    return (await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    })).json();
+  }
+
+  // --- Mode switching ---
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.onclick = () => {
+      if (btn.dataset.mode === currentMode) return;
+      currentMode = btn.dataset.mode;
+      document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+      currentTab = -1;
+      loadTabs();
+    };
+  });
+
+  // --- Tabs ---
+  async function loadTabs() {
+    try {
+      const r = await fetchJson('/api/chat-tabs?mode=' + currentMode);
+      if (!r.ok) { statusText.textContent = 'Error: ' + (r.error || ''); return; }
+      tabs = r.tabs || [];
+      const selectedIdx = tabs.findIndex(t => t.selected);
+      if (currentTab < 0) currentTab = selectedIdx >= 0 ? selectedIdx : 0;
+      renderTabs();
+      restoreDraft();
+      doRefresh(false);
+    } catch (e) {
+      statusText.textContent = 'Error loading tabs';
+    }
+  }
+
+  function renderTabs() {
+    tabBarEl.innerHTML = '';
+    tabs.forEach((t, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'tab-btn' + (i === currentTab ? ' active' : '');
+      btn.textContent = t.title || t.label || '(untitled)';
+      btn.title = t.title || t.label || '';
+      btn.onclick = () => switchTab(i);
+      tabBarEl.appendChild(btn);
+    });
+  }
+
+  function switchTab(idx) {
+    if (idx === currentTab) return;
+    saveScrollAnchor();
+    saveDraft();
+    currentTab = idx;
+    renderTabs();
+    restoreDraft();
+    doRefresh(true);
+  }
+
+  // --- Scroll anchor (operates on iframe's document) ---
+  function getFrameDoc() {
+    try { return chatFrame.contentDocument; } catch { return null; }
+  }
+
+  function getPath(el, root) {
+    const path = [];
+    let node = el;
+    while (node && node !== root && node.parentElement) {
+      path.unshift(Array.prototype.indexOf.call(node.parentElement.children, node));
+      node = node.parentElement;
+    }
+    return path;
+  }
+  function getByPath(root, path) {
+    let node = root;
+    for (const idx of path) {
+      if (!node || !node.children || !node.children[idx]) return null;
+      node = node.children[idx];
+    }
+    return node;
+  }
+
+  function saveScrollAnchor() {
+    if (currentTab < 0) return;
+    const doc = getFrameDoc();
+    if (!doc) return;
+    const body = doc.documentElement;
+    const scrollTop = body.scrollTop || doc.body?.scrollTop || 0;
+    const scrollH = body.scrollHeight || doc.body?.scrollHeight || 0;
+    const clientH = body.clientHeight || doc.body?.clientHeight || 0;
+    const key = currentMode + ':' + currentTab;
+    const atBottom = scrollH - scrollTop - clientH < 80;
+    if (atBottom) { scrollAnchors.set(key, { stickToBottom: true }); return; }
+    const root = doc.getElementById('cv-root');
+    if (root) {
+      const pairs = root.querySelectorAll('.composer-human-ai-pair-container');
+      for (const p of pairs) {
+        if (p.getBoundingClientRect().bottom > 0) {
+          scrollAnchors.set(key, { path: getPath(p, root), offset: -p.getBoundingClientRect().top });
+          return;
+        }
+      }
+    }
+    scrollAnchors.set(key, { scrollTop });
+  }
+
+  function restoreScrollAnchor() {
+    const doc = getFrameDoc();
+    if (!doc) return;
+    const key = currentMode + ':' + currentTab;
+    const anchor = scrollAnchors.get(key);
+    const setScroll = (v) => { doc.documentElement.scrollTop = v; if (doc.body) doc.body.scrollTop = v; };
+    if (!anchor || anchor.stickToBottom) {
+      setScroll(doc.documentElement.scrollHeight);
+      return;
+    }
+    if (anchor.path) {
+      const root = doc.getElementById('cv-root');
+      const el = root ? getByPath(root, anchor.path) : null;
+      if (el) {
+        el.scrollIntoView({ block: 'start' });
+        const cur = doc.documentElement.scrollTop || doc.body?.scrollTop || 0;
+        setScroll(cur + (anchor.offset || 0));
+        return;
+      }
+    }
+    if (anchor.scrollTop != null) setScroll(anchor.scrollTop);
+  }
+
+  // --- Draft ---
+  function draftKey() { return 'chatview-draft:' + currentMode + ':' + currentTab; }
+  function saveDraft() { if (currentTab < 0) return; const t = promptInput.value; t ? localStorage.setItem(draftKey(), t) : localStorage.removeItem(draftKey()); }
+  function restoreDraft() { promptInput.value = localStorage.getItem(draftKey()) || ''; }
+  promptInput.addEventListener('input', () => { if (currentTab >= 0) localStorage.setItem(draftKey(), promptInput.value); });
+
+  // --- Write content into iframe (CSS isolation!) ---
+  let frameInitialized = false;
+
+  let cachedThemeInfo = null;
+
+  function initFrame(styles, themeInfo) {
+    const doc = getFrameDoc();
+    if (!doc) return;
+    const hc = themeInfo?.htmlClass || '';
+    const bc = themeInfo?.bodyClass || '';
+    const hs = themeInfo?.htmlStyle || '';
+    const bs = themeInfo?.bodyStyle || '';
+    const ws = themeInfo?.wbStyle || '';
+    doc.open();
+    doc.write('<!doctype html><html class="' + hc + '" style="' + hs + '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">');
+    if (styles) doc.write('<style id="cs">' + styles + '</style>');
+    doc.write('<style>' + RESPONSIVE_CSS + '</style>');
+    doc.write('</head><body class="' + bc + '" style="' + bs + '"><div id="cv-root" class="monaco-workbench" style="' + ws + '"></div></body></html>');
+    doc.close();
+    frameInitialized = true;
+  }
+
+  function updateFrameContent(html) {
+    const doc = getFrameDoc();
+    if (!doc) return;
+    const root = doc.getElementById('cv-root');
+    if (root) {
+      root.innerHTML = html || '<div style="text-align:center;color:#666;padding:60px 20px">No messages</div>';
+    }
+  }
+
+  function updateFrameStyles(styles) {
+    const doc = getFrameDoc();
+    if (!doc) return;
+    const el = doc.getElementById('cs');
+    if (el) el.textContent = styles;
+  }
+
+
+  // --- Refresh ---
+  async function doRefresh(isSwitch) {
+    if (inflight) return;
+    inflight = true;
+
+    const qs = new URLSearchParams({ mode: currentMode });
+    if (isSwitch && currentTab >= 0) qs.set('tab', String(currentTab));
+    const needStyles = !cachedStyles;
+    if (needStyles) qs.set('needStyles', '1');
+    else if (cachedStylesHash) qs.set('stylesHash', cachedStylesHash);
+
+    try {
+      if (!isSwitch) saveScrollAnchor();
+
+      const [contentR, tabsR] = await Promise.all([
+        fetchJson('/api/chat-content?' + qs.toString()),
+        isSwitch ? null : fetchJson('/api/chat-tabs?mode=' + currentMode).catch(() => null),
+      ]);
+
+      if (tabsR && tabsR.ok) {
+        tabs = tabsR.tabs || [];
+        const cursorSelected = tabs.findIndex(t => t.selected);
+        if (cursorSelected >= 0 && cursorSelected !== currentTab) {
+          saveDraft(); currentTab = cursorSelected; restoreDraft();
+        }
+        renderTabs();
+      }
+
+      if (!contentR.ok) { statusText.textContent = 'Error: ' + (contentR.error || ''); inflight = false; return; }
+
+      if (contentR.styles != null) { cachedStyles = contentR.styles; cachedStylesHash = contentR.stylesHash || ''; }
+      if (contentR.stylesHash) cachedStylesHash = contentR.stylesHash;
+      if (contentR.themeInfo) cachedThemeInfo = contentR.themeInfo;
+
+      if (!frameInitialized) {
+        initFrame(cachedStyles, cachedThemeInfo);
+      } else if (contentR.styles != null) {
+        updateFrameStyles(cachedStyles);
+      }
+      updateFrameContent(contentR.html);
+      if (isSwitch) {
+        setTimeout(() => restoreScrollAnchor(), 50);
+      }
+
+      statusText.textContent = tabs.length + ' tab(s) \u00B7 ' +
+        new Date().toLocaleTimeString() + ' (' + ((contentR.html || '').length / 1024 | 0) + 'KB)';
+    } catch (e) {
+      statusText.textContent = 'Refresh error: ' + String(e.message || e);
+    }
+    inflight = false;
+  }
+
+  function scheduleRefresh() {
+    if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+    const sec = Number(refreshSecSel.value);
+    if (sec > 0 && !sending) {
+      refreshTimer = setTimeout(() => { doRefresh(false).then(scheduleRefresh); }, sec * 1000);
+    }
+  }
+  refreshSecSel.onchange = scheduleRefresh;
+  document.getElementById('btnRefresh').onclick = () => doRefresh(false).then(scheduleRefresh);
+
+  // --- Send ---
+  async function doSend() {
+    const text = promptInput.value.trim();
+    if (!text || sending) return;
+    sending = true; btnSend.disabled = true; sendStatus.textContent = 'sending...';
+    try {
+      const r = await postJson('/api/composer/insert', { text, append: false, send: true });
+      if (r.ok) {
+        promptInput.value = ''; localStorage.removeItem(draftKey());
+        sendStatus.textContent = 'sent';
+        scrollAnchors.set(currentMode + ':' + currentTab, { stickToBottom: true });
+        setTimeout(() => { doRefresh(false).then(scheduleRefresh); }, 800);
+      } else { sendStatus.textContent = 'error: ' + (r.error || ''); }
+    } catch { sendStatus.textContent = 'error'; }
+    sending = false; btnSend.disabled = false;
+    setTimeout(() => { if (sendStatus.textContent === 'sent') sendStatus.textContent = ''; }, 2000);
+  }
+  btnSend.onclick = doSend;
+  promptInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
+
+  // --- Init ---
+  loadTabs().then(scheduleRefresh);
+})();
+</script>
+</body>
+</html>

@@ -30,14 +30,26 @@ function findExistingProcesses() {
   }
 }
 
-// Only match elements with active shimmer CSS animations, not stale tool-call messages.
-// .cursorLoadingBackground and [data-tool-status] are too broad — they match
-// unrelated spinners and completed tool calls that still have loading status.
+// Shimmer selectors for normal Composer mode.
 const SHIMMER_SELECTORS = [
   '.ui-tool-call-line-shimmer',
   '.ui-task-tool-call__shimmer',
   '.ui-collapsible-shimmer',
 ].join(',');
+
+// Agent mode: tool calls in active state (prompt/filename loading animations).
+const AGENT_LOADING_SELECTORS = [
+  '.ui-shell-tool-call__prompt--loading',
+  '.ui-edit-tool-call__filename--loading',
+].join(',');
+
+// Agent mode approval selectors
+const AGENT_APPROVAL_SEL = {
+  runButton: '.composer-run-button',
+  skipButton: '.composer-skip-button',
+  allowlistButton: '.composer-tool-call-allowlist-button',
+  allowButton: '.view-allow-btn-container .anysphere-button',
+};
 
 // ---------------------------------------------------------------------------
 // Page interaction helpers
@@ -68,8 +80,8 @@ async function clickOnce(page, { selector, containsText, requireReady, readyAttr
   }, { selector, containsText, requireReady, readyAttr });
 }
 
-async function detectActivity(page, { selector, containsText, shimmerSelector }) {
-  return await page.evaluate(({ selector, containsText, shimmerSelector }) => {
+async function detectActivity(page, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel }) {
+  return await page.evaluate(({ selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel }) => {
     const btnNodes = Array.from(document.querySelectorAll(selector));
     const hasRun = containsText
       ? btnNodes.some(n => (n.textContent || '').includes(containsText))
@@ -81,8 +93,29 @@ async function detectActivity(page, { selector, containsText, shimmerSelector })
     const hasRunningCmd = Array.from(headers).some(h =>
       /^Runn?(?:ing)? command:/i.test((h.textContent || '').trim())
     );
-    return { hasRun, hasShimmer, composerStatus, hasRunningCmd };
-  }, { selector, containsText, shimmerSelector });
+
+    const isAgent = document.body.classList.contains('agent-unification-enabled')
+      || !!document.querySelector('.composer-unified-dropdown[data-mode="agent"]');
+    const hasAgentLoading = agentLoadingSel
+      ? document.querySelectorAll(agentLoadingSel).length > 0
+      : false;
+    const toolStatuses = Array.from(document.querySelectorAll('[data-tool-status]'))
+      .map(el => el.getAttribute('data-tool-status'));
+    const hasToolLoading = toolStatuses.includes('loading');
+    const hasSkipButton = !!document.querySelector(agentApprovalSel?.skipButton || '.composer-skip-button');
+    const hasAllowlistButton = !!document.querySelector(agentApprovalSel?.allowlistButton || '.composer-tool-call-allowlist-button');
+    const allowBtnSel = agentApprovalSel?.allowButton || '.view-allow-btn-container .anysphere-button';
+    const hasAllowButton = !!document.querySelector(allowBtnSel);
+    const hasAgentRunButton = isAgent && btnNodes.length > 0;
+    const hasAgentApproval = isAgent && (hasSkipButton || hasAllowlistButton || hasAgentRunButton)
+      || hasAllowButton;
+
+    return {
+      hasRun, hasShimmer, composerStatus, hasRunningCmd,
+      isAgent, hasAgentLoading, hasToolLoading,
+      hasSkipButton, hasAllowlistButton, hasAllowButton, hasAgentApproval,
+    };
+  }, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel });
 }
 
 async function scrollChatToBottom(page) {
@@ -185,12 +218,15 @@ class TabScheduler {
     }
   }
 
-  report(index, { hasRun, hasShimmer, composerStatus, hasRunningCmd }) {
+  report(index, activity) {
     const s = this.tabs.get(index);
     if (!s) return;
     const now = Date.now();
 
-    if (hasRun || hasShimmer || composerStatus === 'generating' || hasRunningCmd) {
+    const active = activity.hasRun || activity.hasShimmer
+      || activity.composerStatus === 'generating' || activity.hasRunningCmd
+      || activity.hasAgentApproval || activity.hasAgentLoading || activity.hasToolLoading;
+    if (active) {
       s.waitMs = this.baseWaitMs;
       s.lastActivity = now;
       s.consecutiveIdle = 0;
@@ -326,6 +362,8 @@ async function main() {
     selector: argv.selector,
     containsText: argv.contains || undefined,
     shimmerSelector: SHIMMER_SELECTORS,
+    agentLoadingSel: AGENT_LOADING_SELECTORS,
+    agentApprovalSel: AGENT_APPROVAL_SEL,
   };
 
   // -- once mode --
@@ -371,12 +409,17 @@ async function main() {
       const chunk = Math.min(remain, 500);
       await sleep(chunk);
       remain -= chunk;
-      const [pausedNow, modeNow] = await Promise.all([
-        indicator.getPaused(page),
-        indicator.getMode(page),
-      ]);
-      if (pausedNow || modeNow !== expectedMode) {
-        return { interrupted: true, paused: pausedNow, mode: modeNow };
+      let status;
+      try {
+        status = await indicator.poll(page);
+      } catch {
+        return { interrupted: true, disconnected: true };
+      }
+      if (!status.exists) {
+        return { interrupted: true, disconnected: true };
+      }
+      if (status.paused || status.mode !== expectedMode) {
+        return { interrupted: true, paused: status.paused, mode: status.mode };
       }
     }
     return { interrupted: false, paused: false, mode: expectedMode };
@@ -387,8 +430,19 @@ async function main() {
   let pausedShownMode = null;
 
   while (true) {
-    const mode = await indicator.getMode(page);
-    const paused = await indicator.getPaused(page);
+    let status;
+    try {
+      status = await indicator.poll(page);
+    } catch {
+      if (argv.verbose) console.log('Page disconnected during poll.');
+      break;
+    }
+    if (!status.exists) {
+      if (argv.verbose) console.log('Indicator removed externally.');
+      break;
+    }
+    const mode = status.mode;
+    const paused = status.paused;
 
     if (paused) {
       const pausedLabel = mode === 'scan' ? 'SCAN: paused' : 'WATCH: paused';
@@ -406,7 +460,6 @@ async function main() {
       wasPaused = false;
       pausedShownMode = null;
       if (mode === 'scan') {
-        // Resume behaves like restart for scan scheduling.
         scheduler = new TabScheduler(schedulerConfig);
       }
       try {
@@ -416,7 +469,6 @@ async function main() {
       await sleep(settleMs);
     }
 
-    // Detect mode switch → show init
     if (mode !== prevMode) {
       const label = mode === 'scan' ? 'SCAN: init' : 'WATCH: init';
       try { await indicator.update(page, 'init', label); } catch {}
@@ -425,6 +477,8 @@ async function main() {
       prevMode = mode;
       await sleep(settleMs);
     }
+
+    try {
 
     if (mode === 'scan') {
       // === SCAN MODE ===
@@ -436,10 +490,10 @@ async function main() {
       const delay = pick.waitUntil - Date.now();
       if (delay > 0) {
         const waitResult = await sleepInterruptible(delay, mode);
+        if (waitResult.disconnected) break;
         if (waitResult.interrupted) continue;
       }
 
-      // Show init (gray) while switching tab
       try { await indicator.update(page, 'init', `SCAN: [${pick.index}] ${pick.label}`); } catch {}
 
       const sw = await clickChatTab(page, tabSel, pick.index);
@@ -454,12 +508,15 @@ async function main() {
       scheduler.report(pick.index, activity);
 
       const isGen = activity.composerStatus === 'generating';
-      const isActive = activity.hasShimmer || isGen;
-      const tag = activity.hasRun ? 'RUN' : activity.hasRunningCmd ? 'RUN'
+      const isActive = activity.hasShimmer || isGen || activity.hasAgentLoading
+        || (activity.hasToolLoading && activity.composerStatus !== 'completed');
+      const tag = activity.hasRun ? 'RUN'
+        : activity.hasAgentApproval ? 'APPROVE'
+        : activity.hasRunningCmd ? 'RUN'
         : isActive ? 'SHIMMER' : 'idle';
       try {
-        if (activity.hasRun || activity.hasRunningCmd) {
-          await indicator.update(page, 'clicked', `SCAN: RUN [${pick.index}]`);
+        if (activity.hasRun || activity.hasRunningCmd || activity.hasAgentApproval) {
+          await indicator.update(page, 'clicked', `SCAN: ${tag} [${pick.index}]`);
         } else if (isActive) {
           await indicator.update(page, 'shimmer', `SCAN: SHIMMER [${pick.index}]`);
         } else {
@@ -476,19 +533,32 @@ async function main() {
       if (activity.hasRun) {
         const r = await clickOnce(page, clickOpts);
         if (argv.verbose) console.log(r.ok ? '  >> Clicked OK' : `  >> Click failed: ${r.reason}`);
+      } else if (activity.hasAllowButton) {
+        const r = await clickOnce(page, {
+          selector: AGENT_APPROVAL_SEL.allowButton,
+          requireReady: clickOpts.requireReady,
+          readyAttr: clickOpts.readyAttr,
+        });
+        if (argv.verbose) console.log(r.ok ? '  >> Allow clicked' : `  >> Allow click failed: ${r.reason}`);
+      } else if (activity.hasAgentApproval) {
+        const r = await clickOnce(page, { ...clickOpts, containsText: undefined });
+        if (argv.verbose) console.log(r.ok ? '  >> Agent approved' : `  >> Agent approve failed: ${r.reason}`);
       }
 
     } else {
       // === WATCH MODE ===
       const activity = await detectActivity(page, activityOpts);
       const isGen = activity.composerStatus === 'generating';
-      const isActive = activity.hasShimmer || isGen;
-      const tag = activity.hasRun ? 'RUN' : activity.hasRunningCmd ? 'RUN'
+      const isActive = activity.hasShimmer || isGen || activity.hasAgentLoading
+        || (activity.hasToolLoading && activity.composerStatus !== 'completed');
+      const tag = activity.hasRun ? 'RUN'
+        : activity.hasAgentApproval ? 'APPROVE'
+        : activity.hasRunningCmd ? 'RUN'
         : isActive ? 'SHIMMER' : 'idle';
 
       try {
-        if (activity.hasRun || activity.hasRunningCmd) {
-          await indicator.update(page, 'clicked', 'WATCH: RUN');
+        if (activity.hasRun || activity.hasRunningCmd || activity.hasAgentApproval) {
+          await indicator.update(page, 'clicked', `WATCH: ${tag}`);
         } else if (isActive) {
           await indicator.update(page, 'shimmer', 'WATCH: SHIMMER');
         } else {
@@ -499,14 +569,36 @@ async function main() {
       if (activity.hasRun) {
         const r = await clickOnce(page, clickOpts);
         if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Clicked OK' : 'Click failed: ' + r.reason}`);
+      } else if (activity.hasAllowButton) {
+        const r = await clickOnce(page, {
+          selector: AGENT_APPROVAL_SEL.allowButton,
+          requireReady: clickOpts.requireReady,
+          readyAttr: clickOpts.readyAttr,
+        });
+        if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Allow clicked' : 'Allow click failed: ' + r.reason}`);
+      } else if (activity.hasAgentApproval) {
+        const r = await clickOnce(page, { ...clickOpts, containsText: undefined });
+        if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Agent approved' : 'Agent approve failed: ' + r.reason}`);
       } else if (argv.verbose && tag !== 'idle') {
         console.log(`[${tag}]`);
       }
 
       const waitResult = await sleepInterruptible(argv.interval, mode);
+      if (waitResult.disconnected) break;
       if (waitResult.interrupted) continue;
     }
+
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (/closed|destroyed|disposed|disconnected/i.test(msg)) {
+        if (argv.verbose) console.log('Page disconnected during loop.');
+        break;
+      }
+      throw e;
+    }
   }
+
+  await closeAll(0);
 }
 
 main().catch((e) => {

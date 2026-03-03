@@ -19,6 +19,28 @@
     #liveWrap::-webkit-scrollbar-thumb { background: #3b7dd8; border-radius: 5px; }
     #liveWrap::-webkit-scrollbar-thumb:hover { background: #5a9bf0; }
     #liveWrap { scrollbar-color: #3b7dd8 rgba(30,30,30,.6); }
+
+    @keyframes axSpin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .ax-bar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:10px; transition: background .2s, border-color .2s; border:1px solid rgba(158,158,158,0.25); background:rgba(158,158,158,0.08); }
+    .ax-spinner { width:16px; height:16px; border-radius:50%; box-sizing:border-box; flex-shrink:0; border:2.5px solid rgba(0,0,0,0.1); border-top-color:#9e9e9e; animation:axSpin 1.5s linear infinite; }
+    .ax-label { font-size:13px; font-weight:500; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .ax-meta { font-size:11px; color:#888; margin-left:auto; white-space:nowrap; flex-shrink:0; }
+    .ax-bar[data-ax-state="scanning"] { background:rgba(229,57,53,0.08); border-color:rgba(229,57,53,0.25); }
+    .ax-bar[data-ax-state="scanning"] .ax-spinner { border-top-color:#e53935; animation-duration:1s; }
+    .ax-bar[data-ax-state="shimmer"] { background:rgba(251,140,0,0.08); border-color:rgba(251,140,0,0.25); }
+    .ax-bar[data-ax-state="shimmer"] .ax-spinner { border-top-color:#fb8c00; animation-duration:0.8s; }
+    .ax-bar[data-ax-state="clicked"] { background:rgba(67,160,71,0.08); border-color:rgba(67,160,71,0.25); }
+    .ax-bar[data-ax-state="clicked"] .ax-spinner { border-top-color:#43a047; animation-duration:0.6s; }
+    .ax-bar[data-ax-state="generating"] { background:rgba(67,160,71,0.08); border-color:rgba(67,160,71,0.25); }
+    .ax-bar[data-ax-state="generating"] .ax-spinner { border-top-color:#43a047; animation-duration:1.2s; }
+    .ax-bar[data-ax-state="paused"] { background:rgba(120,144,156,0.08); border-color:rgba(120,144,156,0.25); }
+    .ax-bar[data-ax-state="paused"] .ax-spinner { border-top-color:#90a4ae; animation:none; }
+    .ax-bar[data-ax-state="stopped"] { background:rgba(158,158,158,0.05); border-color:rgba(158,158,158,0.2); }
+    .ax-bar[data-ax-state="stopped"] .ax-spinner { border-top-color:#bbb; animation:none; }
+    .ax-bar[data-ax-state="dead"] { background:rgba(229,57,53,0.05); border-color:rgba(229,57,53,0.2); }
+    .ax-bar[data-ax-state="dead"] .ax-spinner { border-top-color:#e53935; animation:none; }
+    button:disabled { opacity:.45; cursor:default; }
+    button:disabled:hover { background:#f7f7f7; }
   </style>
 </head>
 <body>
@@ -34,14 +56,31 @@
       <label>Contains <input id="contains" value="" size="10" /></label>
     </div>
     <div class="row">
-      <button id="btnClick">Click once</button>
-      <button id="btnStart">Start auto-click</button>
-      <button id="btnStop">Stop auto-click</button>
       <button id="btnCapture">Capture static snapshot</button>
       <button id="btnLatest">Open latest capture</button>
     </div>
     <div class="row hint">
       <span id="status">Status: (loading…)</span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="row" style="align-items:center">
+      <strong>Auto Click</strong>
+      <span id="axSource" class="hint"></span>
+    </div>
+    <div id="axBar" class="ax-bar" data-ax-state="stopped" style="margin:6px 0">
+      <div class="ax-spinner"></div>
+      <span class="ax-label" id="axLabel">stopped</span>
+      <span class="ax-meta" id="axMeta"></span>
+    </div>
+    <div class="row">
+      <button id="btnAxStartWatch">Start Watch</button>
+      <button id="btnAxStartScan">Start Scan</button>
+      <button id="btnAxStop" disabled>Stop</button>
+      <button id="btnAxPause" disabled>Pause</button>
+      <button id="btnAxMode" disabled title="Switch watch/scan mode">W/S</button>
+      <button id="btnClick">Click Once</button>
     </div>
   </div>
 
@@ -91,6 +130,7 @@
           <option value="0">Manual</option>
         </select>
       </label>
+      <button id="btnChatView" style="background:#2a3a55;border-color:#3b7dd8">Chat View</button>
       <button id="btnLiveStart">Start Live</button>
       <button id="btnLiveStop">Stop Live</button>
       <button id="btnLiveRefresh">Refresh Now</button>
@@ -163,22 +203,116 @@
     return await r.json();
   }
 
+  // --- Auto Click control panel ---
+  const axBar = document.getElementById('axBar');
+  const axLabel = document.getElementById('axLabel');
+  const axMeta = document.getElementById('axMeta');
+  const axSource = document.getElementById('axSource');
+  const btnAxStartWatch = document.getElementById('btnAxStartWatch');
+  const btnAxStartScan = document.getElementById('btnAxStartScan');
+  const btnAxStop = document.getElementById('btnAxStop');
+  const btnAxPause = document.getElementById('btnAxPause');
+  const btnAxMode = document.getElementById('btnAxMode');
+
+  let axState = { exists: false };
+
+  function updateAxUI(ind) {
+    axState = ind;
+    const alive = ind.exists && ind.hbAgeMs < 15000;
+    const dead = ind.exists && ind.hbAgeMs >= 15000;
+
+    let displayState;
+    if (!ind.exists) displayState = 'stopped';
+    else if (dead) displayState = 'dead';
+    else displayState = ind.state || 'init';
+
+    axBar.dataset.axState = displayState;
+    axLabel.textContent = !ind.exists ? 'stopped' : dead ? 'disconnected' : (ind.label || ind.state || 'unknown');
+
+    if (!ind.exists) {
+      axMeta.textContent = '';
+      axSource.textContent = '';
+    } else if (dead) {
+      axMeta.textContent = 'hb ' + Math.round(ind.hbAgeMs / 1000) + 's ago';
+      axSource.textContent = '';
+    } else {
+      axMeta.textContent = ind.mode + (ind.paused ? ' (paused)' : '') + ' | hb ' + Math.round(ind.hbAgeMs / 1000) + 's ago';
+    }
+
+    const running = alive;
+    const paused = alive && ind.paused;
+
+    btnAxStartWatch.disabled = running;
+    btnAxStartScan.disabled = running;
+    btnAxStop.disabled = !running && !dead;
+    btnAxPause.disabled = !running;
+    btnAxPause.textContent = paused ? 'Resume' : 'Pause';
+    btnAxMode.disabled = !running;
+    btnAxMode.textContent = running ? (ind.mode === 'scan' ? 'S\u2192W' : 'W\u2192S') : 'W/S';
+  }
+
+  let axPollTimer = null;
+  async function pollAx() {
+    try {
+      const qs = new URLSearchParams({ host: hostEl.value.trim(), port: portEl.value.trim() });
+      const r = await fetch('/api/click/indicator?' + qs, { headers: authHeaders() }).then(r => r.json());
+      if (r.ok) updateAxUI(r);
+      if (r.source) axSource.textContent = '(' + r.source + ')';
+    } catch {}
+  }
+
+  async function pollAxWithStatus() {
+    try {
+      const qs = new URLSearchParams({ host: hostEl.value.trim(), port: portEl.value.trim() });
+      const r = await fetch('/api/click/status?' + qs, { headers: authHeaders() }).then(r => r.json());
+      if (r.ok && r.indicator) {
+        updateAxUI(r.indicator);
+        if (r.source) axSource.textContent = '(' + r.source + ')';
+        if (r.active && (r.stdoutTail || r.stderrTail)) {
+          const combined = (r.stderrTail || '') ? (r.stderrTail + '\n' + (r.stdoutTail || '')) : (r.stdoutTail || '');
+          if (combined.trim()) logEl.textContent = combined;
+        }
+      }
+    } catch {}
+  }
+
+  pollAxWithStatus();
+  axPollTimer = setInterval(pollAxWithStatus, 1500);
+
+  btnAxStartWatch.onclick = async () => {
+    log('Starting watch...');
+    const r = await post('/api/click/start', { host: hostEl.value.trim(), port: Number(portEl.value), mode: 'watch' });
+    log(r);
+    if (r.ok) setTimeout(pollAx, 1000);
+  };
+  btnAxStartScan.onclick = async () => {
+    log('Starting scan...');
+    const r = await post('/api/click/start', { host: hostEl.value.trim(), port: Number(portEl.value), mode: 'scan' });
+    log(r);
+    if (r.ok) setTimeout(pollAx, 1000);
+  };
+  btnAxStop.onclick = async () => {
+    log('Stopping...');
+    const r = await post('/api/click/stop', { host: hostEl.value.trim(), port: Number(portEl.value) });
+    log(r);
+    setTimeout(pollAx, 500);
+  };
+  btnAxPause.onclick = async () => {
+    const nextPaused = !(axState.exists && axState.paused);
+    const r = await post('/api/click/pause', { host: hostEl.value.trim(), port: Number(portEl.value), paused: nextPaused });
+    log(r);
+    if (r.ok) setTimeout(pollAx, 300);
+  };
+  btnAxMode.onclick = async () => {
+    const nextMode = (axState.mode === 'scan') ? 'watch' : 'scan';
+    const r = await post('/api/click/mode', { host: hostEl.value.trim(), port: Number(portEl.value), mode: nextMode });
+    log(r);
+    if (r.ok) setTimeout(pollAx, 300);
+  };
+
   document.getElementById('btnClick').onclick = async () => {
     log('Running...');
     const r = await post('/api/click', payload());
-    log(r);
-  };
-
-  document.getElementById('btnStart').onclick = async () => {
-    log('Starting auto-click...');
-    const body = { ...payload(), interval: 300 };
-    const r = await post('/api/click/start', body);
-    log(r);
-  };
-
-  document.getElementById('btnStop').onclick = async () => {
-    log('Stopping auto-click...');
-    const r = await post('/api/click/stop', {});
     log(r);
   };
 
@@ -269,7 +403,39 @@
         }
       } catch {}
 
-      // Swap: hide old first, then show new (avoid both being in flow simultaneously)
+      // Build structural path: array of child indices from documentElement to el
+      function getPath(el) {
+        const path = [];
+        let node = el;
+        while (node && node.parentElement) {
+          path.unshift(Array.prototype.indexOf.call(node.parentElement.children, node));
+          node = node.parentElement;
+        }
+        return path;
+      }
+      function getByPath(doc, path) {
+        let node = doc.documentElement;
+        for (const idx of path) {
+          if (!node || !node.children || !node.children[idx]) return null;
+          node = node.children[idx];
+        }
+        return node;
+      }
+
+      // Read internal scroll positions from CURRENT frame before swap
+      const internalScrolls = [];
+      try {
+        const curDoc = curFrame.contentDocument;
+        if (curDoc) {
+          curDoc.querySelectorAll('*').forEach(el => {
+            if ((el.scrollTop > 0 || el.scrollLeft > 0) && el.clientHeight > 0) {
+              internalScrolls.push({ path: getPath(el), scrollTop: el.scrollTop, scrollLeft: el.scrollLeft });
+            }
+          });
+        }
+      } catch {}
+
+      // Swap: hide old first, then show new
       curFrame.onload = null;
       curFrame.style.visibility = 'hidden';
       curFrame.style.position = 'absolute';
@@ -281,6 +447,22 @@
       // Restore wrapper scroll position
       liveWrapEl.scrollTop = savedScrollTop;
       liveWrapEl.scrollLeft = savedScrollLeft;
+
+      // Restore internal scroll positions via structural path
+      if (internalScrolls.length) {
+        try {
+          const newDoc = nextFrame.contentDocument;
+          if (newDoc) {
+            for (const s of internalScrolls) {
+              const el = getByPath(newDoc, s.path);
+              if (!el) continue;
+              if (el.scrollHeight > el.clientHeight) el.scrollTop = s.scrollTop;
+              if (el.scrollWidth > el.clientWidth) el.scrollLeft = s.scrollLeft;
+            }
+          }
+        } catch {}
+      }
+
       liveStatusEl.textContent = 'live at ' + new Date().toLocaleTimeString() + ' (' + loadMs + 'ms)';
       console.log('[live-view] iframe loaded in ' + loadMs + 'ms');
       if (livePendingRefresh) {
@@ -320,8 +502,13 @@
     if (e.data?.type === 'cursor-auto-click-done' && liveRunning) {
       requestLiveRefresh();
     }
+    if (e.data?.type === 'cursor-auto-scroll') {
+      liveWrapEl.scrollTop += (e.data.deltaY || 0);
+      liveWrapEl.scrollLeft += (e.data.deltaX || 0);
+    }
   });
 
+  document.getElementById('btnChatView').onclick = () => window.open('/chat-view.html', '_blank');
   document.getElementById('btnLiveStart').onclick = startLive;
   document.getElementById('btnLiveStop').onclick = stopLive;
   document.getElementById('btnLiveRefresh').onclick = requestLiveRefresh;
@@ -434,26 +621,15 @@
       const qs = new URLSearchParams({ host: hostEl.value.trim(), port: String(Number(portEl.value)) });
       const r = await fetch('/api/status?' + qs.toString(), { headers: authHeaders() }).then(r => r.json());
       const cdp = r?.cdp?.ok ? 'CDP: ok' : 'CDP: down';
-      const w = r?.watcherRunning ? 'auto-click: ON' : 'auto-click: off';
       const latest = r?.latestUrl ? `latest: ${r.latestUrl}` : 'latest: (none)';
-      statusEl.textContent = `Status: ${cdp} | ${w} | ${latest}`;
-
-      // also pull watcher logs (tail)
-      const wstat = await fetch('/api/click/status', { headers: authHeaders() }).then(r => r.json());
-      if (wstat?.running) {
-        const combined = (wstat.stderrTail || '')
-          ? (wstat.stderrTail + "\n" + (wstat.stdoutTail || ''))
-          : (wstat.stdoutTail || '');
-        if (combined.trim()) logEl.textContent = combined;
-      }
+      statusEl.textContent = `Status: ${cdp} | ${latest}`;
     } catch {
       statusEl.textContent = 'Status: (error contacting server)';
     }
   }
 
-  // refresh every 2s
   refreshStatus();
-  setInterval(refreshStatus, 2000);
+  setInterval(refreshStatus, 5000);
 </script>
 </body>
 </html>
