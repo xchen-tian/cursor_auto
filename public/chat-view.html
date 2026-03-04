@@ -26,7 +26,7 @@
     .tab-btn:hover { color:#ccc; background:#2a2a2a; }
     .tab-btn.active { color:#fff; border-bottom-color:#3b7dd8; }
 
-    #chatFrame { flex:1; min-height:0; border:none; width:100%; }
+    #chatFrame { flex:1; min-height:0; }
 
     #promptArea { flex-shrink:0; border-top:1px solid #333; background:#1e1e1e; }
     #promptInner { display:flex; gap:8px; max-width:min(900px,100%); margin:0 auto; padding:8px 12px; align-items:flex-end; }
@@ -65,7 +65,7 @@
 
   <div id="tabBar"></div>
 
-  <iframe id="chatFrame"></iframe>
+  <iframe id="chatFrame" style="flex:1;min-height:0;border:none;width:100%;"></iframe>
 
   <div id="promptArea">
     <div id="promptInner">
@@ -109,6 +109,8 @@
     #cv-root .composer-human-ai-pair-container,
     #cv-root .composer-human-message-container,
     #cv-root .composer-code-block-container { width:100%!important; max-width:100%!important; }
+    /* Monaco scrollbar remnants (server strips most, this catches CSS-based ones) */
+    #cv-root .monaco-scrollable-element > .scrollbar { display:none!important; }
     .markdown-section { overflow-wrap:anywhere; word-break:break-word; }
     pre { max-width:100%; overflow-x:auto; }
     table { display:block; max-width:100%; overflow-x:auto; }
@@ -255,19 +257,25 @@
   function restoreDraft() { promptInput.value = localStorage.getItem(draftKey()) || ''; }
   promptInput.addEventListener('input', () => { if (currentTab >= 0) localStorage.setItem(draftKey(), promptInput.value); });
 
-  // --- Write content into iframe (CSS isolation!) ---
+  // --- Write content into iframe (single frame, CSS isolation) ---
+  let cachedThemeInfo = null;
   let frameInitialized = false;
 
-  let cachedThemeInfo = null;
+  function stripLayout(s) {
+    return (s || '')
+      .replace(/overflow\s*:\s*hidden\s*;?/g, '')
+      .replace(/height\s*:\s*\d+(\.\d+)?px\s*;?/g, '')
+      .replace(/width\s*:\s*\d+(\.\d+)?px\s*;?/g, '');
+  }
 
   function initFrame(styles, themeInfo) {
     const doc = getFrameDoc();
     if (!doc) return;
     const hc = themeInfo?.htmlClass || '';
     const bc = themeInfo?.bodyClass || '';
-    const hs = themeInfo?.htmlStyle || '';
-    const bs = themeInfo?.bodyStyle || '';
-    const ws = themeInfo?.wbStyle || '';
+    const hs = stripLayout(themeInfo?.htmlStyle);
+    const bs = stripLayout(themeInfo?.bodyStyle);
+    const ws = stripLayout(themeInfo?.wbStyle);
     doc.open();
     doc.write('<!doctype html><html class="' + hc + '" style="' + hs + '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">');
     if (styles) doc.write('<style id="cs">' + styles + '</style>');
@@ -277,20 +285,11 @@
     frameInitialized = true;
   }
 
-  function updateFrameContent(html) {
+  function updateContent(html) {
     const doc = getFrameDoc();
     if (!doc) return;
     const root = doc.getElementById('cv-root');
-    if (root) {
-      root.innerHTML = html || '<div style="text-align:center;color:#666;padding:60px 20px">No messages</div>';
-    }
-  }
-
-  function updateFrameStyles(styles) {
-    const doc = getFrameDoc();
-    if (!doc) return;
-    const el = doc.getElementById('cs');
-    if (el) el.textContent = styles;
+    if (root) root.innerHTML = html || '<div style="text-align:center;color:#666;padding:60px 20px">No messages</div>';
   }
 
 
@@ -330,13 +329,8 @@
 
       if (!frameInitialized) {
         initFrame(cachedStyles, cachedThemeInfo);
-      } else if (contentR.styles != null) {
-        updateFrameStyles(cachedStyles);
       }
-      updateFrameContent(contentR.html);
-      if (isSwitch) {
-        setTimeout(() => restoreScrollAnchor(), 50);
-      }
+      updateContent(contentR.html);
 
       statusText.textContent = tabs.length + ' tab(s) \u00B7 ' +
         new Date().toLocaleTimeString() + ' (' + ((contentR.html || '').length / 1024 | 0) + 'KB)';

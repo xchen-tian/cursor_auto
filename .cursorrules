@@ -278,6 +278,49 @@ server.js 必须用 `peek()` 而非 `poll()` 来读状态，否则会"续命"已
 | `[data-tool-call-id]` | Agent 工具调用 ID |
 | `.composer-tool-call-container` | Agent 工具调用容器 |
 
+### 视图布局检测（Agent View vs Editor View）
+
+Cursor 有两种主要布局，通过 Ctrl+E 切换。程序通过 `auto_click.js` 的 `detectViewMode()` 自动识别：
+
+**Agent View**（Unified Agents Sidebar）：
+
+| 选择器 | 用途 |
+|--------|------|
+| `body.agent-unification-enabled` | **最可靠全局标志**（body class） |
+| `.unified-agents-sidebar` | Agent 侧边栏容器 |
+| `.agent-sidebar-cell` | 对话列表项 |
+| `.agent-sidebar-cell[data-selected="true"]` | 当前选中的对话 |
+| `.agent-sidebar-cell-text` | 对话标题（需过滤 `.tertiary` 的 "More" 项） |
+| `.composer-bar.editor` | Composer 栏在 Agent 布局中带 `.editor` class |
+| `.nostatusbar` | Agent 布局隐藏状态栏（`.monaco-workbench` class） |
+
+**Editor View**（Auxiliary Bar 横向 Tab）：
+
+| 选择器 | 用途 |
+|--------|------|
+| body class **不含** `agent-unification-enabled` | 全局判断标志 |
+| `#workbench.parts.auxiliarybar [role="tablist"] > [role="tab"]` | 对话 Tab 列表 |
+| `[role="tab"][aria-selected="true"]` | 当前选中的 Tab |
+| `[role="tab"] a[aria-id="chat-horizontal-tab"]` | Tab 标题链接 |
+| `[aria-label*="Switch to Agent Layout"]` | 切换到 Agent 布局的按钮（仅 Editor View 存在） |
+
+**body class 对照**：
+
+| 布局 | body class 示例 |
+|------|-----------------|
+| Agent View（Agent 侧边栏可见）| `agent-unification-enabled unifiedsidebarvisible` + `data-sidebar-position="right"` |
+| Agent View（文件管理器可见）| `agent-unification-enabled unifiedsidebarhidden sidebarvisible` + `data-sidebar-position="left"` |
+| Editor View | `sidebarvisible unifiedsidebarhidden` + `data-sidebar-position="left"` |
+
+**检测逻辑**（`auto_click.js` → `detectViewMode()`）：
+
+```javascript
+if (document.body.classList.contains('agent-unification-enabled')) return 'agent';
+// else → 'editor'
+```
+
+Tab 操作由 `listChatTabs()` / `clickChatTab()` 自动适配：Agent View 操作 `.agent-sidebar-cell`，Editor View 操作 auxiliarybar `[role="tab"]`。
+
 ---
 
 ## 环境变量

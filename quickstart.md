@@ -213,6 +213,16 @@ npm run capture
 
 在一台机器上打开多个 Cursor 编辑器，每个独立自动化。
 
+### 前置知识：为什么需要 `--user-data-dir`
+
+Cursor 基于 Electron，内置了**单实例锁（Single Instance Lock）**机制：
+
+1. 第一个 Cursor 启动时，在 `%AppData%\Cursor\` 下创建 **lockfile** 并占用一个**命名管道**
+2. 后续启动的 Cursor 检测到 lockfile 已存在，会把命令行参数通过管道转发给第一个进程，然后**自己退出**
+3. 第一个进程收到消息后只是在内部开一个新窗口——`--remote-debugging-port` 等参数**被丢弃**
+
+因此，仅靠不同的 `--remote-debugging-port` **无法**启动多个独立进程。必须同时指定不同的 `--user-data-dir`，使每个实例的 lockfile 路径不同，Electron 才会将其视为**不同的应用**并允许各自独立运行。
+
 ### 架构
 
 ```
@@ -223,6 +233,7 @@ npm run capture
            │                   │                   │
     Cursor 实例 A        Cursor 实例 B        Cursor 实例 C
     CDP 端口 9222        CDP 端口 9223        CDP 端口 9224
+    user-data 默认       user-data-2          user-data-3
     project-a            project-b            project-c
 ```
 
@@ -230,23 +241,40 @@ cursor_auto 通过网络端口连接 Cursor，**不需要放在项目目录里**
 
 ### 端口分配
 
-| 实例 | Cursor CDP 端口 | Dashboard 端口（可选） |
-|------|----------------|----------------------|
-| A    | 9222           | 5123                 |
-| B    | 9223           | 5124                 |
-| C    | 9224           | 5125                 |
+| 实例 | Cursor CDP 端口 | user-data-dir | Dashboard 端口（可选） |
+|------|----------------|---------------|----------------------|
+| A    | 9222           | （默认）       | 5123                 |
+| B    | 9223           | `C:\cursor9223` | 5124              |
+| C    | 9224           | `C:\cursor9224` | 5125              |
 
-CDP 端口从 9222 起递增，Dashboard 端口从 5123 起递增。
+CDP 端口从 9222 起递增，Dashboard 端口从 5123 起递增。第一个实例可使用默认 user-data-dir，其余实例必须指定独立目录。
+
+> **注意**：使用独立 `--user-data-dir` 的实例拥有独立的扩展和设置，首次启动时需要重新登录和配置。
 
 ### 步骤 1：启动多个 Cursor
 
-每个 Cursor 实例指定不同的 `--remote-debugging-port`：
+每个 Cursor 实例指定不同的 `--remote-debugging-port`，**第二个实例起**必须加 `--user-data-dir`：
 
 ```powershell
+# 实例 A —— 使用默认 user-data-dir
 cursor --remote-debugging-port=9222 C:\p\project-a
-cursor --remote-debugging-port=9223 C:\p\project-b
-cursor --remote-debugging-port=9224 C:\p\project-c
+
+# 实例 B —— 必须指定独立 user-data-dir，否则会复用实例 A 的进程
+cursor --remote-debugging-port=9223 --user-data-dir="C:\cursor9223" C:\p\project-b
+
+# 实例 C
+cursor --remote-debugging-port=9224 --user-data-dir="C:\cursor9224" C:\p\project-c
 ```
+
+启动后验证各端口是否正常：
+
+```powershell
+curl http://127.0.0.1:9222/json/version
+curl http://127.0.0.1:9223/json/version
+curl http://127.0.0.1:9224/json/version
+```
+
+三个都能返回 JSON 才说明三个独立进程均已就绪。
 
 ### 步骤 2：启动自动点击
 
@@ -288,16 +316,16 @@ $env:PORT=5124; node src/server.js
 
 ### 便捷启动脚本
 
-可以在各项目目录放一个一行的 `.bat` 文件快速启动 Cursor：
+可以在各项目目录放一个 `.bat` 文件快速启动 Cursor：
 
 ```bat
-:: C:\p\project-a\start_cursor.bat
+:: C:\p\project-a\start_cursor.bat（第一个实例，使用默认 user-data-dir）
 cursor --remote-debugging-port=9222 .
 ```
 
 ```bat
-:: C:\p\project-b\start_cursor.bat
-cursor --remote-debugging-port=9223 .
+:: C:\p\project-b\start_cursor.bat（第二个实例，必须指定独立 user-data-dir）
+cursor --remote-debugging-port=9223 --user-data-dir="C:\cursor9223" .
 ```
 
 或者写一个统一的启动脚本放在 cursor_auto 目录：
@@ -305,7 +333,7 @@ cursor --remote-debugging-port=9223 .
 ```powershell
 # c:\p\cursor_auto\start_all.ps1
 cursor --remote-debugging-port=9222 C:\p\project-a
-cursor --remote-debugging-port=9223 C:\p\project-b
+cursor --remote-debugging-port=9223 --user-data-dir="C:\cursor9223" C:\p\project-b
 Start-Sleep -Seconds 5
 Start-Process powershell -ArgumentList "-Command", "cd c:\p\cursor_auto; node src/auto_click.js --port 9222 --verbose --force --scan-tabs"
 Start-Process powershell -ArgumentList "-Command", "cd c:\p\cursor_auto; node src/auto_click.js --port 9223 --verbose --force --scan-tabs"

@@ -781,6 +781,26 @@ async function main() {
         $(el).removeAttr('onclick').removeAttr('onload').removeAttr('onerror').removeAttr('onmouseover');
       });
 
+      // Only strip overflow:hidden + height from Monaco scroll containers,
+      // NOT from content elements like code blocks, tool calls, etc.
+      container.find('.monaco-scrollable-element').each((_, el) => {
+        let style = $(el).attr('style') || '';
+        style = style
+          .replace(/overflow\s*:\s*hidden\s*;?/g, '')
+          .replace(/height\s*:\s*\d+(\.\d+)?px\s*;?/g, '');
+        $(el).attr('style', style.trim() || null);
+        // Also fix the direct child div (the actual scroll viewport)
+        $(el).children('div').each((_, child) => {
+          let cs = $(child).attr('style') || '';
+          cs = cs
+            .replace(/overflow\s*:\s*hidden\s*;?/g, '')
+            .replace(/height\s*:\s*\d+(\.\d+)?px\s*;?/g, '');
+          $(child).attr('style', cs.trim() || null);
+        });
+      });
+      // Remove Monaco custom scrollbar UI (not content)
+      container.find('.monaco-scrollable-element > .scrollbar').remove();
+
       const html = container.html() || '';
       const result = { ok: true, html, stylesHash, themeInfo };
       if (styles !== null) result.styles = styles;

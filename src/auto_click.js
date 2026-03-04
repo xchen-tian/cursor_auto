@@ -197,25 +197,37 @@ class TabScheduler {
   }
 
   sync(tabList) {
-    const seen = new Set();
     const now = Date.now();
+    const oldTabs = this.tabs;
+    const newTabs = new Map();
+
     for (const t of tabList) {
-      seen.add(t.index);
-      if (!this.tabs.has(t.index)) {
-        this.tabs.set(t.index, {
+      let existing = oldTabs.get(t.index);
+
+      if (!existing || existing.label !== t.label) {
+        for (const [k, v] of oldTabs) {
+          if (v.label === t.label && !newTabs.has(k)) {
+            existing = v;
+            break;
+          }
+        }
+      }
+
+      if (existing) {
+        existing.label = t.label;
+        newTabs.set(t.index, existing);
+      } else {
+        newTabs.set(t.index, {
           label: t.label,
           waitMs: this.baseWaitMs,
           nextCheckAt: now + this.baseWaitMs * (t.index + 1),
           lastActivity: 0,
           consecutiveIdle: 0,
         });
-      } else {
-        this.tabs.get(t.index).label = t.label;
       }
     }
-    for (const k of this.tabs.keys()) {
-      if (!seen.has(k)) this.tabs.delete(k);
-    }
+
+    this.tabs = newTabs;
   }
 
   report(index, activity) {
@@ -225,7 +237,8 @@ class TabScheduler {
 
     const active = activity.hasRun || activity.hasShimmer
       || activity.composerStatus === 'generating' || activity.hasRunningCmd
-      || activity.hasAgentApproval || activity.hasAgentLoading || activity.hasToolLoading;
+      || activity.hasAgentApproval || activity.hasAgentLoading
+      || (activity.hasToolLoading && activity.composerStatus !== 'completed');
     if (active) {
       s.waitMs = this.baseWaitMs;
       s.lastActivity = now;
@@ -428,6 +441,7 @@ async function main() {
   let prevMode = initialMode;
   let wasPaused = false;
   let pausedShownMode = null;
+  let lastCheckedTab = -1;
 
   while (true) {
     let status;
@@ -461,6 +475,7 @@ async function main() {
       pausedShownMode = null;
       if (mode === 'scan') {
         scheduler = new TabScheduler(schedulerConfig);
+        lastCheckedTab = -1;
       }
       try {
         await indicator.update(page, 'init', mode === 'scan' ? 'SCAN: resumed' : 'WATCH: resumed');
@@ -474,6 +489,7 @@ async function main() {
       try { await indicator.update(page, 'init', label); } catch {}
       if (argv.verbose) console.log(`[MODE] ${prevMode} → ${mode}`);
       if (mode === 'scan') scheduler = new TabScheduler(schedulerConfig);
+      lastCheckedTab = -1;
       prevMode = mode;
       await sleep(settleMs);
     }
@@ -487,6 +503,8 @@ async function main() {
       const pick = scheduler.pickNext();
       if (!pick) { await sleep(1000); continue; }
 
+      const sameTab = pick.index === lastCheckedTab;
+
       const delay = pick.waitUntil - Date.now();
       if (delay > 0) {
         const waitResult = await sleepInterruptible(delay, mode);
@@ -494,15 +512,19 @@ async function main() {
         if (waitResult.interrupted) continue;
       }
 
-      try { await indicator.update(page, 'init', `SCAN: [${pick.index}] ${pick.label}`); } catch {}
+      if (!sameTab) {
+        try { await indicator.update(page, 'init', `SCAN: [${pick.index}] ${pick.label}`); } catch {}
 
-      const sw = await clickChatTab(page, tabSel, pick.index);
-      if (!sw.ok) {
-        if (argv.verbose) console.log(`Tab ${pick.index} switch failed: ${sw.reason}`);
-        continue;
+        const sw = await clickChatTab(page, tabSel, pick.index);
+        if (!sw.ok) {
+          if (argv.verbose) console.log(`Tab ${pick.index} switch failed: ${sw.reason}`);
+          continue;
+        }
+        await sleep(settleMs);
+        try { await scrollChatToBottom(page); } catch {}
       }
-      await sleep(settleMs);
-      try { await scrollChatToBottom(page); } catch {}
+
+      lastCheckedTab = pick.index;
 
       const activity = await detectActivity(page, activityOpts);
       scheduler.report(pick.index, activity);
@@ -527,7 +549,7 @@ async function main() {
 
       if (argv.verbose) {
         const sec = (scheduler.tabs.get(pick.index)?.waitMs / 1000).toFixed(0);
-        console.log(`[${tag}] tab ${pick.index} "${sw.label}" next:${sec}s  |  ${scheduler.statusLine()}`);
+        console.log(`[${tag}] tab ${pick.index} "${pick.label}" next:${sec}s  |  ${scheduler.statusLine()}`);
       }
 
       if (activity.hasRun) {
