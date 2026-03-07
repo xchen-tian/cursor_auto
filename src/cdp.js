@@ -53,12 +53,17 @@ async function findPageWithSelector(context, {
 
 /**
  * Extract project name from a Cursor window title.
- * Title format: "[filename - ] projectName - profile - Cursor"
+ * Title format: "[filename - ] projectName - profile - Cursor [- suffix]"
+ * Suffix can be "Untracked", "Modified", etc.
  */
 function extractProjectName(title) {
-  const parts = (title || '').split(' - ');
-  if (parts.length >= 3 && parts[parts.length - 1].trim() === 'Cursor') {
-    return parts[parts.length - 3]?.trim() || parts[0].trim();
+  const parts = (title || '').split(' - ').map(s => s.trim());
+  const cursorIdx = parts.lastIndexOf('Cursor');
+  if (cursorIdx >= 2) {
+    return parts[cursorIdx - 2];
+  }
+  if (parts.length >= 3 && parts[parts.length - 1] === 'Cursor') {
+    return parts[parts.length - 3] || parts[0];
   }
   return title || 'unknown';
 }

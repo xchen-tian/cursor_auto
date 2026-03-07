@@ -16,7 +16,7 @@ async function discoverWindows(host, port) {
   const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
   const targets = await resp.json();
   return targets
-    .filter(t => t.type === 'page' && / - Cursor$/.test(t.title))
+    .filter(t => t.type === 'page' && / - Cursor(?:\s*-\s*\w+)?$/.test(t.title))
     .map(t => ({
       id: t.id,
       title: t.title,

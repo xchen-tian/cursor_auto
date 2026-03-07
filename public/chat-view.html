@@ -20,6 +20,20 @@
     #topBar button, #topBar select { padding:4px 10px; border-radius:6px; border:1px solid #555; background:#333;
                                      color:#ddd; cursor:pointer; font-size:12px; }
     #topBar button:hover { background:#444; }
+    #winBar { flex-shrink:0; display:flex; gap:0; background:#1a1a1a; border-bottom:1px solid #333;
+              overflow-x:auto; scrollbar-width:thin; min-height:0; }
+    #winBar:empty { display:none; }
+    .win-btn { flex-shrink:0; padding:5px 14px; border:none; border-bottom:2px solid transparent;
+               background:transparent; color:#777; cursor:pointer; font-size:12px; white-space:nowrap;
+               display:flex; align-items:center; gap:5px; }
+    .win-btn:hover { color:#ccc; background:#252525; }
+    .win-btn.active { color:#ddd; border-bottom-color:#5b9bf0; background:#222; }
+    .win-btn .wdot { width:6px; height:6px; border-radius:50%; flex-shrink:0; background:#555; }
+    .win-btn .wdot[data-st="scanning"] { background:#e53935; }
+    .win-btn .wdot[data-st="shimmer"] { background:#fb8c00; }
+    .win-btn .wdot[data-st="clicked"],.win-btn .wdot[data-st="generating"] { background:#43a047; }
+    .win-btn .wdot[data-st="paused"] { background:#90a4ae; }
+
     #tabBar { flex-shrink:0; display:flex; gap:0; background:#222; border-bottom:1px solid #333;
               overflow-x:auto; scrollbar-width:thin; min-height:36px; }
     .tab-btn { flex-shrink:0; padding:8px 16px; border:none; border-bottom:2px solid transparent;
@@ -88,6 +102,7 @@
     <span id="axMini" data-st="stopped" title="Auto Click status"><span class="dot"></span><span class="lbl" id="axMiniLbl">--</span></span>
   </div>
 
+  <div id="winBar"></div>
   <div id="tabBar" style="display:flex;align-items:stretch"></div>
 
   <iframe id="chatFrame" style="flex:1;min-height:0;border:none;width:100%;"></iframe>
@@ -114,6 +129,10 @@
   const statusText = document.getElementById('statusText');
   const refreshSecSel = document.getElementById('refreshSec');
 
+  const winBarEl = document.getElementById('winBar');
+  let selectedTargetId = '';
+  let knownWindows = [];
+
   let currentTab = -1;
   let tabs = [];
   let cachedStyles = '';
@@ -123,6 +142,55 @@
   let inflight = false;
 
   const scrollAnchors = new Map();
+
+  // --- Window selector ---
+  function renderWindowBar() {
+    winBarEl.innerHTML = '';
+    if (knownWindows.length <= 1) return;
+    for (const w of knownWindows) {
+      const btn = document.createElement('button');
+      btn.className = 'win-btn' + (w.targetId === selectedTargetId ? ' active' : '');
+      const dot = document.createElement('span');
+      dot.className = 'wdot';
+      const ind = w.indicator || {};
+      if (ind.exists && ind.hbAgeMs < 15000) dot.dataset.st = ind.state || '';
+      btn.appendChild(dot);
+      btn.appendChild(document.createTextNode(w.project));
+      btn.onclick = () => switchWindow(w.targetId);
+      winBarEl.appendChild(btn);
+    }
+  }
+
+  function switchWindow(targetId) {
+    if (targetId === selectedTargetId) return;
+    saveScrollAnchor();
+    saveDraft();
+    selectedTargetId = targetId;
+    currentTab = -1;
+    tabs = [];
+    cachedStyles = '';
+    cachedStylesHash = '';
+    frameInitialized = false;
+    scrollAnchors.clear();
+    renderWindowBar();
+    tabBarEl.innerHTML = '';
+    loadTabs().then(scheduleRefresh);
+  }
+
+  async function refreshWindows() {
+    try {
+      const r = await fetchJson('/api/windows');
+      if (!r.ok || !r.windows) return;
+      knownWindows = r.windows;
+      if (!selectedTargetId && knownWindows.length > 0) {
+        selectedTargetId = knownWindows[0].targetId;
+      }
+      if (selectedTargetId && !knownWindows.find(w => w.targetId === selectedTargetId)) {
+        selectedTargetId = knownWindows.length > 0 ? knownWindows[0].targetId : '';
+      }
+      renderWindowBar();
+    } catch {}
+  }
 
   const RESPONSIVE_CSS = `
     html, body { margin:0; padding:0; background:#181818; overflow:auto; height:auto; width:auto;
@@ -161,7 +229,8 @@
   // --- Tabs ---
   async function loadTabs() {
     try {
-      const r = await fetchJson('/api/chat-tabs');
+      const tqs = selectedTargetId ? '?targetId=' + selectedTargetId : '';
+      const r = await fetchJson('/api/chat-tabs' + tqs);
       if (!r.ok) { statusText.textContent = 'Error: ' + (r.error || ''); return; }
       tabs = r.tabs || [];
       const selectedIdx = tabs.findIndex(t => t.selected);
@@ -340,13 +409,15 @@
     const needStyles = !cachedStyles;
     if (needStyles) qs.set('needStyles', '1');
     else if (cachedStylesHash) qs.set('stylesHash', cachedStylesHash);
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
 
     try {
       if (!isSwitch) saveScrollAnchor();
 
+      const tabsQs = selectedTargetId ? '?targetId=' + selectedTargetId : '';
       const [contentR, tabsR] = await Promise.all([
         fetchJson('/api/chat-content?' + qs.toString()),
-        isSwitch ? null : fetchJson('/api/chat-tabs').catch(() => null),
+        isSwitch ? null : fetchJson('/api/chat-tabs' + tabsQs).catch(() => null),
       ]);
 
       if (tabsR && tabsR.ok) {
@@ -399,7 +470,9 @@
     if (!text || sending) return;
     sending = true; btnSend.disabled = true; sendStatus.textContent = 'sending...';
     try {
-      const r = await postJson('/api/composer/insert', { text, append: false, send: true });
+      const body = { text, append: false, send: true };
+      if (selectedTargetId) body.targetId = selectedTargetId;
+      const r = await postJson('/api/composer/insert', body);
       if (r.ok) {
         promptInput.value = ''; localStorage.removeItem(draftKey());
         sendStatus.textContent = 'sent';
@@ -421,7 +494,9 @@
     btnStop.disabled = true;
     sendStatus.textContent = 'stopping...';
     try {
-      const r = await postJson('/api/remote-click', { selector: STOP_SEL });
+      const stopBody = { selector: STOP_SEL };
+      if (selectedTargetId) stopBody.targetId = selectedTargetId;
+      const r = await postJson('/api/remote-click', stopBody);
       sendStatus.textContent = r.ok ? 'stopped' : 'stop failed: ' + (r.reason || r.error || '');
       if (r.ok) {
         btnStop.classList.remove('visible');
@@ -438,7 +513,8 @@
 
   async function pollAxMini() {
     try {
-      const r = await fetchJson('/api/click/status');
+      const axQs = selectedTargetId ? '?targetId=' + selectedTargetId : '';
+      const r = await fetchJson('/api/click/status' + axQs);
       if (!r.ok) return;
       const ind = r.indicator || {};
       const alive = ind.exists && ind.hbAgeMs < 15000;
@@ -459,7 +535,8 @@
   setInterval(pollAxMini, 2000);
 
   // --- Init ---
-  loadTabs().then(scheduleRefresh);
+  refreshWindows().then(() => loadTabs().then(scheduleRefresh));
+  setInterval(refreshWindows, 8000);
 })();
 </script>
 </body>
