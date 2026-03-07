@@ -6,15 +6,27 @@ const zlib = require('zlib');
 const express = require('express');
 const { spawn } = require('child_process');
 const mime = require('mime-types');
-const { connectOverCDP, findPageWithSelector, sleep } = require('./cdp');
+const { connectOverCDP, findPageWithSelector, findPageByTargetId, findAllWorkbenchPages, extractProjectName, sleep } = require('./cdp');
 const { renderLive, buildResMap, extractPageStyles, makeAttrRewriter } = require('./live_render');
 const cheerio = require('cheerio');
+const indicator = require('./indicator');
+const { makeWatcherKey, findRunningClickSupervisors } = require('./click_watch_lock');
 
 // Node >= 18 provides global fetch.
 
 function tailLines(s, maxLines = 200) {
   const lines = String(s || '').split(/\r?\n/);
   return lines.slice(Math.max(0, lines.length - maxLines)).join('\n');
+}
+
+function parseTrailingJson(s) {
+  const text = String(s || '').trim();
+  for (let idx = text.lastIndexOf('{'); idx >= 0; idx = text.lastIndexOf('{', idx - 1)) {
+    try {
+      return JSON.parse(text.slice(idx));
+    } catch {}
+  }
+  return null;
 }
 
 function latestCaptureDir(baseDir) {
@@ -85,17 +97,28 @@ async function main() {
   const captureBase = path.join(__dirname, '..', 'dist', 'capture');
   app.use('/captures', express.static(captureBase));
 
-  // A single long-running watcher process (auto-click loop)
-  /** @type {{ child: import('child_process').ChildProcess | null, startedAt: number|null, params: any, out: string, err: string }} */
-  const watcher = { child: null, startedAt: null, params: null, out: '', err: '' };
+  // Long-running watcher processes keyed by host:port.
+  /** @type {Map<string, { child: import('child_process').ChildProcess, startedAt: number, params: any, out: string, err: string }>} */
+  const watchers = new Map();
 
-  function stopWatcher() {
-    if (!watcher.child) return { ok: true, stopped: false };
+  function getWatcher(host, port) {
+    return watchers.get(makeWatcherKey(host, port)) || null;
+  }
+
+  function stopWatcher(host, port) {
+    const key = makeWatcherKey(host, port);
+    const watcher = watchers.get(key);
+    if (!watcher?.child) return { ok: true, stopped: false };
     try { watcher.child.kill('SIGTERM'); } catch {}
-    watcher.child = null;
-    watcher.startedAt = null;
-    watcher.params = null;
+    watchers.delete(key);
     return { ok: true, stopped: true };
+  }
+
+  function stopAllWatchers() {
+    for (const watcher of watchers.values()) {
+      try { watcher.child.kill('SIGTERM'); } catch {}
+    }
+    watchers.clear();
   }
 
   app.post('/api/click', async (req, res) => {
@@ -127,11 +150,18 @@ async function main() {
     res.json({ ok: r.code === 0, code: r.code, stdout: r.out, stderr: r.err });
   });
 
-  // Start long-running auto-click loop (one watcher at a time)
+  // Start long-running auto-click loop via supervisor (manages all windows)
   app.post('/api/click/start', async (req, res) => {
     const { host='127.0.0.1', port=9222, selector='.composer-run-button', contains='Fetch', requireReady=true, interval=300, mode='watch' } = req.body || {};
-    if (watcher.child) {
+    const key = makeWatcherKey(host, port);
+    const watcher = getWatcher(host, port);
+    if (watcher?.child) {
       return res.status(409).json({ ok: false, error: 'watcher_already_running', startedAt: watcher.startedAt, params: watcher.params });
+    }
+
+    const existing = findRunningClickSupervisors({ host, port });
+    if (existing.length > 0) {
+      return res.status(409).json({ ok: false, error: 'watcher_already_running', source: 'external', existing });
     }
 
     const probe = await probeCDP(host, port);
@@ -144,16 +174,19 @@ async function main() {
       });
     }
 
-    // Check if an external auto_click already has an indicator running
+    // Check if any workbench page already has an active indicator
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
-      const ind = await indicator.peek(state.page);
-      if (ind.exists && ind.hbAgeMs < 15000) {
-        return res.status(409).json({ ok: false, error: 'indicator_already_active', indicator: ind });
+      await ensureBrowserConnected(host, port);
+      const allPages = await findAllWorkbenchPages(liveState.context, { timeoutMs: 5000 });
+      for (const wp of allPages) {
+        const ind = await indicator.peek(wp.page);
+        if (ind.exists && ind.hbAgeMs < 15000) {
+          return res.status(409).json({ ok: false, error: 'indicator_already_active', indicator: ind, window: wp.project });
+        }
       }
     } catch {}
 
-    const script = path.join(__dirname, 'auto_click.js');
+    const script = path.join(__dirname, 'click_supervisor.js');
     const args = [
       '--host', String(host),
       '--port', String(port),
@@ -166,57 +199,92 @@ async function main() {
     if (!requireReady) args.push('--require-ready=false');
 
     const child = spawnNodeLong(script, args);
-    watcher.child = child;
-    watcher.startedAt = Date.now();
-    watcher.params = { host, port, selector, contains, requireReady, interval, mode };
-    watcher.out = '';
-    watcher.err = '';
-    child.stdout.on('data', (d) => watcher.out += d.toString());
-    child.stderr.on('data', (d) => watcher.err += d.toString());
-    child.on('exit', () => {
-      watcher.child = null;
-      watcher.startedAt = null;
-      watcher.params = null;
+    const record = {
+      child,
+      startedAt: Date.now(),
+      params: { host, port, selector, contains, requireReady, interval, mode },
+      out: '',
+      err: '',
+    };
+    watchers.set(key, record);
+    child.stdout.on('data', (d) => {
+      const current = watchers.get(key);
+      if (current?.child === child) current.out += d.toString();
     });
-    res.json({ ok: true, startedAt: watcher.startedAt, params: watcher.params });
+    child.stderr.on('data', (d) => {
+      const current = watchers.get(key);
+      if (current?.child === child) current.err += d.toString();
+    });
+    child.on('exit', () => {
+      const current = watchers.get(key);
+      if (current?.child === child) watchers.delete(key);
+    });
+    res.json({ ok: true, startedAt: record.startedAt, params: record.params });
   });
 
   app.post('/api/click/stop', async (req, res) => {
     const { host='127.0.0.1', port=9222 } = req.body || {};
-    const processResult = stopWatcher();
+    const processResult = stopWatcher(host, port);
 
-    // Also remove indicator DOM so externally-started auto_click will exit
-    let indicatorRemoved = false;
+    // Remove indicator DOM from all workbench pages
+    let removedCount = 0;
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
-      const r = await indicator.remove(state.page);
-      indicatorRemoved = r?.removed || false;
+      await ensureBrowserConnected(host, port);
+      const allPages = await findAllWorkbenchPages(liveState.context, { timeoutMs: 5000 });
+      for (const wp of allPages) {
+        try {
+          const r = await indicator.remove(wp.page);
+          if (r?.removed) removedCount++;
+        } catch {}
+      }
     } catch {}
 
-    res.json({ ...processResult, indicatorRemoved });
+    res.json({ ...processResult, indicatorRemoved: removedCount > 0, removedCount });
   });
 
   app.get('/api/click/status', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
+    const reqTargetId = req.query.targetId || '';
+    const watcher = getWatcher(host, port);
 
-    let ind = { exists: false };
+    const windows = [];
+    let anyAlive = false;
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
-      ind = await indicator.peek(state.page);
+      await ensureBrowserConnected(host, port);
+      const allPages = await findAllWorkbenchPages(liveState.context, { timeoutMs: 5000 });
+      for (const wp of allPages) {
+        const ind = await indicator.peek(wp.page).catch(() => ({ exists: false }));
+        const alive = ind.exists && ind.hbAgeMs < 15000;
+        if (alive) anyAlive = true;
+        windows.push({ targetId: wp.targetId, project: wp.project, title: wp.title, indicator: ind });
+      }
     } catch {}
 
+    // For backward compat: pick the requested window or first one
+    let ind = { exists: false };
+    if (reqTargetId) {
+      const w = windows.find(w => w.targetId === reqTargetId);
+      if (w) ind = w.indicator;
+    } else if (windows.length > 0) {
+      ind = windows[0].indicator;
+    }
     const indicatorAlive = ind.exists && ind.hbAgeMs < 15000;
+    const externalWatchers = watcher?.child ? [] : findRunningClickSupervisors({ host, port });
+    const hasExternalWatcher = externalWatchers.length > 0;
+
     res.json({
       ok: true,
-      active: !!watcher.child || indicatorAlive,
-      source: watcher.child ? 'server' : indicatorAlive ? 'external' : null,
-      running: !!watcher.child,
-      startedAt: watcher.startedAt,
-      params: watcher.params,
+      active: !!watcher?.child || hasExternalWatcher || anyAlive,
+      source: watcher?.child ? 'server' : (hasExternalWatcher || anyAlive) ? 'external' : null,
+      running: !!watcher?.child,
+      startedAt: watcher?.startedAt || null,
+      params: watcher?.params || null,
       indicator: ind,
-      stdoutTail: tailLines(watcher.out, 200),
-      stderrTail: tailLines(watcher.err, 200),
+      windows,
+      stdoutTail: tailLines(watcher?.out, 200),
+      stderrTail: tailLines(watcher?.err, 200),
+      externalWatchers,
     });
   });
 
@@ -224,9 +292,10 @@ async function main() {
   app.get('/api/click/indicator', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
+    const targetId = req.query.targetId || '';
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
+      const state = await getLiveCDP(host, port, targetId ? { targetId, timeout: 5000 } : { timeout: 5000 });
       const ind = await indicator.peek(state.page);
       res.json({ ok: true, ...ind });
     } catch (e) {
@@ -234,31 +303,64 @@ async function main() {
     }
   });
 
-  // POST /api/click/mode — switch watch/scan mode on running indicator
+  // POST /api/click/mode — switch watch/scan mode on ALL running indicators
   app.post('/api/click/mode', async (req, res) => {
     const { host='127.0.0.1', port=9222, mode } = req.body || {};
     if (mode !== 'watch' && mode !== 'scan') {
       return res.status(400).json({ ok: false, error: 'mode must be "watch" or "scan"' });
     }
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
-      await indicator.setMode(state.page, mode);
-      res.json({ ok: true, mode });
+      await ensureBrowserConnected(host, port);
+      const allPages = await findAllWorkbenchPages(liveState.context, { timeoutMs: 5000 });
+      let count = 0;
+      for (const wp of allPages) {
+        try { await indicator.setMode(wp.page, mode); count++; } catch {}
+      }
+      res.json({ ok: true, mode, windowCount: count });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
   });
 
-  // POST /api/click/pause — pause or resume running indicator
+  // POST /api/click/pause — pause or resume ALL running indicators
   app.post('/api/click/pause', async (req, res) => {
     const { host='127.0.0.1', port=9222, paused } = req.body || {};
     if (typeof paused !== 'boolean') {
       return res.status(400).json({ ok: false, error: 'paused must be a boolean' });
     }
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 5000);
-      await indicator.setPaused(state.page, paused);
-      res.json({ ok: true, paused });
+      await ensureBrowserConnected(host, port);
+      const allPages = await findAllWorkbenchPages(liveState.context, { timeoutMs: 5000 });
+      let count = 0;
+      for (const wp of allPages) {
+        try { await indicator.setPaused(wp.page, paused); count++; } catch {}
+      }
+      res.json({ ok: true, paused, windowCount: count });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  // GET /api/windows — list all Cursor workbench windows
+  app.get('/api/windows', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9222);
+
+    try {
+      await ensureBrowserConnected(host, port);
+      const allPages = await findAllWorkbenchPages(liveState.context, { timeoutMs: 8000 });
+      const windows = [];
+      for (const wp of allPages) {
+        let ind = { exists: false };
+        try { ind = await indicator.peek(wp.page); } catch {}
+        windows.push({
+          targetId: wp.targetId,
+          project: wp.project,
+          title: wp.title,
+          indicator: ind,
+        });
+      }
+      res.json({ ok: true, count: windows.length, windows });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
@@ -295,13 +397,14 @@ async function main() {
   app.get('/api/status', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
+    const watcher = getWatcher(host, port);
     const probe = await probeCDP(host, port);
     const latest = latestCaptureDir(captureBase);
     const rel = latest ? path.relative(captureBase, latest).replace(/\\/g, '/') : null;
     res.json({
       ok: true,
       cdp: probe,
-      watcherRunning: !!watcher.child,
+      watcherRunning: !!watcher?.child,
       latestCapture: rel,
       latestUrl: rel ? `/captures/${rel}/index.html` : null,
     });
@@ -336,10 +439,12 @@ async function main() {
   // Persistent CDP connection for live rendering (avoids child-process spawn)
   // ---------------------------------------------------------------------------
   const liveState = {
-    browser: null, context: null, page: null, client: null,
-    resMap: null, resMapAt: 0,
-    cssCache: new Map(),
+    browser: null,
+    context: null,
     connecting: null,
+    key: '',
+    cssCache: new Map(),
+    pages: new Map(), // targetId -> { page, client, resMap, resMapAt, title, project }
   };
   const RES_MAP_TTL = 60 * 1000;
   const CSS_TTL = 5 * 60 * 1000;
@@ -348,54 +453,115 @@ async function main() {
     try { liveState.browser?.close(); } catch {}
     liveState.browser = null;
     liveState.context = null;
-    liveState.page = null;
-    liveState.client = null;
-    liveState.resMap = null;
-    liveState.resMapAt = 0;
+    liveState.pages.clear();
     liveState.connecting = null;
+    liveState.key = '';
   }
 
-  async function getLiveCDP(host, port, selector, timeout) {
+  async function ensureBrowserConnected(host, port) {
+    const wantedKey = makeWatcherKey(host, port);
     if (liveState.connecting) {
       await liveState.connecting;
-      if (liveState.page) return liveState;
+      if (liveState.context && liveState.key === wantedKey) return;
     }
-
-    if (liveState.page) {
-      try {
-        await liveState.page.title();
-        return liveState;
-      } catch {
+    if (liveState.context) {
+      if (liveState.key !== wantedKey) {
         resetLiveCDP();
+      } else {
+        try {
+          liveState.context.pages();
+          return;
+        } catch {
+          resetLiveCDP();
+        }
       }
     }
-
     liveState.connecting = (async () => {
       try {
         const { browser, context } = await connectOverCDP({ host, port });
-        const page = await findPageWithSelector(context, {
-          selector, timeoutMs: timeout || 15000,
-        });
-        if (!page) throw new Error('Workbench page not found');
-        const client = await context.newCDPSession(page);
-        await client.send('Page.enable');
-
         liveState.browser = browser;
         liveState.context = context;
-        liveState.page = page;
-        liveState.client = client;
-        liveState.resMap = null;
-        liveState.resMapAt = 0;
+        liveState.key = wantedKey;
       } finally {
         liveState.connecting = null;
       }
     })();
     await liveState.connecting;
-    return liveState;
   }
 
-  async function ensureResMap(state) {
+  /**
+   * Get a live CDP page+client for a specific window.
+   * @param {string} host
+   * @param {number} port
+   * @param {object} opts - { targetId, windowIndex, selector, timeout }
+   *   targetId takes priority; windowIndex (default 0) as fallback.
+   * @returns {{ page, client, resMap, resMapAt, cssCache }}
+   */
+  async function getLiveCDP(host, port, selectorOrOpts, timeoutOrUndef) {
+    let targetId, windowIndex, selector, timeout;
+    if (typeof selectorOrOpts === 'object' && selectorOrOpts !== null && !Array.isArray(selectorOrOpts)) {
+      ({ targetId, windowIndex = 0, selector = '.monaco-workbench', timeout = 15000 } = selectorOrOpts);
+    } else {
+      selector = selectorOrOpts || '.monaco-workbench';
+      timeout = timeoutOrUndef || 15000;
+      windowIndex = 0;
+    }
+
+    await ensureBrowserConnected(host, port);
+
+    let page;
+    let pageTargetId = targetId;
+
+    if (targetId) {
+      const cached = liveState.pages.get(targetId);
+      if (cached) {
+        try {
+          await cached.page.title();
+          return { page: cached.page, client: cached.client, resMap: cached.resMap, resMapAt: cached.resMapAt, cssCache: liveState.cssCache };
+        } catch {
+          liveState.pages.delete(targetId);
+        }
+      }
+      page = await findPageByTargetId(liveState.context, targetId, timeout);
+      if (!page) throw new Error(`Page not found for targetId: ${targetId}`);
+    } else {
+      const all = await findAllWorkbenchPages(liveState.context, { timeoutMs: timeout });
+      if (all.length === 0) throw new Error('No workbench page found');
+      if (windowIndex >= all.length) throw new Error(`windowIndex ${windowIndex} out of range (found ${all.length})`);
+      const entry = all[windowIndex];
+      page = entry.page;
+      pageTargetId = entry.targetId;
+
+      const cached = liveState.pages.get(pageTargetId);
+      if (cached) {
+        try {
+          await cached.page.title();
+          return { page: cached.page, client: cached.client, resMap: cached.resMap, resMapAt: cached.resMapAt, cssCache: liveState.cssCache };
+        } catch {
+          liveState.pages.delete(pageTargetId);
+        }
+      }
+    }
+
+    const client = await liveState.context.newCDPSession(page);
+    await client.send('Page.enable');
+    const title = await page.title().catch(() => '');
+    const ps = { page, client, resMap: null, resMapAt: 0, title, project: extractProjectName(title) };
+    liveState.pages.set(pageTargetId, ps);
+
+    return { page: ps.page, client: ps.client, resMap: ps.resMap, resMapAt: ps.resMapAt, cssCache: liveState.cssCache };
+  }
+
+  async function ensureResMap(state, targetId) {
     const now = Date.now();
+    if (targetId) {
+      const ps = liveState.pages.get(targetId);
+      if (ps && ps.resMap && (now - ps.resMapAt) < RES_MAP_TTL) return ps.resMap;
+      const tree = await state.client.send('Page.getResourceTree');
+      const resMap = buildResMap(tree);
+      if (ps) { ps.resMap = resMap; ps.resMapAt = now; }
+      return resMap;
+    }
     if (state.resMap && (now - state.resMapAt) < RES_MAP_TTL) return state.resMap;
     const tree = await state.client.send('Page.getResourceTree');
     state.resMap = buildResMap(tree);
@@ -407,15 +573,15 @@ async function main() {
   app.get('/api/live', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
-    const selector = String(req.query.selector || '.monaco-workbench');
     const timeout = Number(req.query.timeout || 15000);
+    const targetId = req.query.targetId || '';
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
 
     let state;
     try {
-      state = await getLiveCDP(host, port, selector, timeout);
+      state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout });
     } catch (e) {
       resetLiveCDP();
       return res.status(400).send('<html><body>CDP connect failed: ' + String(e?.message || e) + '</body></html>');
@@ -457,15 +623,15 @@ async function main() {
 
   // POST /api/remote-click — trigger CDP click on remote Cursor
   app.post('/api/remote-click', async (req, res) => {
-    const { host='127.0.0.1', port=9222, selector, containsText='', requireReady=false } = req.body || {};
-    console.log('[remote-click] selector=%s', selector?.substring(0, 120));
+    const { host='127.0.0.1', port=9222, selector, containsText='', requireReady=false, targetId='' } = req.body || {};
+    console.log('[remote-click] selector=%s targetId=%s', selector?.substring(0, 120), targetId?.substring(0, 8));
 
     if (!selector || !selector.trim()) {
       return res.status(400).json({ ok: false, error: 'selector is required' });
     }
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
       const result = await state.page.evaluate((sel) => {
         const node = document.querySelector(sel);
         if (!node) return { ok: false, reason: 'not_found' };
@@ -492,10 +658,10 @@ async function main() {
 
   // POST /api/remote-scroll — forward wheel events via CDP + direct scrollTop
   app.post('/api/remote-scroll', async (req, res) => {
-    const { host='127.0.0.1', port=9222, x=0, y=0, deltaX=0, deltaY=0 } = req.body || {};
+    const { host='127.0.0.1', port=9222, x=0, y=0, deltaX=0, deltaY=0, targetId='' } = req.body || {};
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
 
       // Strategy 1: CDP mouseWheel for general page elements (editor, sidebar, etc.)
       await state.client.send('Input.dispatchMouseEvent', {
@@ -548,7 +714,7 @@ async function main() {
   app.post('/api/composer/insert', async (req, res) => {
     const {
       host = '127.0.0.1', port = 9222,
-      text = '', append = true, send = false,
+      text = '', append = true, send = false, targetId = '',
     } = req.body || {};
     console.log('[composer/insert] len=%d append=%s send=%s', text.length, append, send);
 
@@ -557,7 +723,7 @@ async function main() {
     }
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
 
       const focused = await state.page.evaluate(({ sel, selectAll }) => {
         const editor = document.querySelector(sel);
@@ -606,11 +772,11 @@ async function main() {
 
   // POST /api/composer/send — press Enter to send current composer content
   app.post('/api/composer/send', async (req, res) => {
-    const { host = '127.0.0.1', port = 9222 } = req.body || {};
+    const { host = '127.0.0.1', port = 9222, targetId = '' } = req.body || {};
     console.log('[composer/send]');
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
 
       await state.page.evaluate((sel) => {
         const editor = document.querySelector(sel);
@@ -627,6 +793,38 @@ async function main() {
     }
   });
 
+  // POST /api/composer/new-chat — click the "New Chat" button in Cursor
+  const NEW_CHAT_SEL = 'a.codicon-add-two[role="button"]';
+
+  app.post('/api/composer/new-chat', async (req, res) => {
+    const { host = '127.0.0.1', port = 9222, targetId = '' } = req.body || {};
+    console.log('[composer/new-chat] targetId=%s', (targetId || '').substring(0, 8));
+
+    try {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+
+      const result = await state.page.evaluate((sel) => {
+        const btns = Array.from(document.querySelectorAll(sel));
+        const btn = btns.find(b => (b.getAttribute('aria-label') || '').includes('New Chat'));
+        if (!btn) return { ok: false, reason: 'not_found', candidates: btns.length };
+
+        btn.scrollIntoView({ block: 'center' });
+        btn.click();
+        return {
+          ok: true,
+          ariaLabel: (btn.getAttribute('aria-label') || '').substring(0, 80),
+        };
+      }, NEW_CHAT_SEL);
+
+      console.log('[composer/new-chat] result:', JSON.stringify(result));
+      res.json(result);
+    } catch (e) {
+      console.log('[composer/new-chat] error:', e.message);
+      resetLiveCDP();
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Chat View API — tab list + conversation content extraction
   // ---------------------------------------------------------------------------
@@ -637,21 +835,25 @@ async function main() {
   app.get('/api/chat-tabs', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
-    const mode = String(req.query.mode || 'agent');
+    const targetId = req.query.targetId || '';
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
-      const tabs = await state.page.evaluate((mode) => {
-        if (mode === 'agent') {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+      const result = await state.page.evaluate(() => {
+        const isAgent = document.body.classList.contains('agent-unification-enabled');
+
+        if (isAgent) {
           const rows = document.querySelectorAll('.agent-sidebar-cell[data-selected]');
-          return Array.from(rows).slice(0, 5)
+          const tabs = Array.from(rows).slice(0, 10)
             .map((r, i) => ({
               index: i,
               title: (r.querySelector('.agent-sidebar-cell-text')?.textContent || '').trim(),
               selected: r.dataset.selected === 'true',
             }))
             .filter(t => t.title.length > 0 && t.title !== 'More');
+          return { mode: 'agent', tabs };
         }
+
         const filter = (t) => {
           if (t.closest('.tabs-container')) return false;
           if (t.closest('.panel .composite-bar')) return false;
@@ -659,15 +861,16 @@ async function main() {
           if (t.closest('.activitybar')) return false;
           return true;
         };
-        return Array.from(document.querySelectorAll('[role="tab"]'))
+        const tabs = Array.from(document.querySelectorAll('[role="tab"]'))
           .filter(filter)
           .map((t, i) => ({
             index: i,
             title: (t.getAttribute('aria-label') || t.textContent || '').trim().substring(0, 60),
             selected: t.getAttribute('aria-selected') === 'true',
           }));
-      }, mode);
-      res.json({ ok: true, mode, tabs });
+        return { mode: 'editor', tabs };
+      });
+      res.json({ ok: true, ...result });
     } catch (e) {
       console.log('[chat-tabs] error:', e.message);
       resetLiveCDP();
@@ -678,19 +881,20 @@ async function main() {
   app.get('/api/chat-content', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
-    const mode = String(req.query.mode || 'agent');
     const tab = Number(req.query.tab ?? -1);
     const needStyles = req.query.needStyles === '1';
     const clientHash = String(req.query.stylesHash || '');
+    const targetId = req.query.targetId || '';
 
     try {
-      const state = await getLiveCDP(host, port, '.monaco-workbench', 10000);
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
 
       if (tab >= 0) {
-        const switched = await state.page.evaluate(({ mode, idx }) => {
-          if (mode === 'agent') {
+        const switched = await state.page.evaluate(({ idx }) => {
+          const isAgent = document.body.classList.contains('agent-unification-enabled');
+          if (isAgent) {
             const rows = Array.from(document.querySelectorAll('.agent-sidebar-cell[data-selected]'))
-              .slice(0, 5)
+              .slice(0, 10)
               .filter(r => {
                 const t = (r.querySelector('.agent-sidebar-cell-text')?.textContent || '').trim();
                 return t.length > 0 && t !== 'More';
@@ -713,7 +917,7 @@ async function main() {
           if (tabs[idx].getAttribute('aria-selected') === 'true') return { ok: true, alreadySelected: true };
           tabs[idx].click();
           return { ok: true, alreadySelected: false };
-        }, { mode, idx: tab });
+        }, { idx: tab });
 
         if (!switched.ok) {
           return res.status(400).json({ ok: false, error: switched.reason || 'switch failed' });
@@ -747,14 +951,22 @@ async function main() {
         stylesHash = chatStylesCache.hash || clientHash;
       }
 
-      // Extract theme classes + inline CSS vars from Cursor DOM
-      const themeInfo = await state.page.evaluate(() => {
+      // Extract theme classes, CSS vars, and composer status from Cursor DOM
+      const { themeInfo, composerStatus } = await state.page.evaluate(() => {
+        const bar = document.querySelector('.composer-bar[data-composer-status]');
+        const stopBtn = document.querySelector('.send-with-mode .anysphere-icon-button[data-stop-button="true"]');
         return {
-          htmlClass: document.documentElement.className || '',
-          bodyClass: document.body?.className || '',
-          htmlStyle: document.documentElement.getAttribute('style') || '',
-          bodyStyle: document.body?.getAttribute('style') || '',
-          wbStyle: document.querySelector('.monaco-workbench')?.getAttribute('style') || '',
+          themeInfo: {
+            htmlClass: document.documentElement.className || '',
+            bodyClass: document.body?.className || '',
+            htmlStyle: document.documentElement.getAttribute('style') || '',
+            bodyStyle: document.body?.getAttribute('style') || '',
+            wbStyle: document.querySelector('.monaco-workbench')?.getAttribute('style') || '',
+          },
+          composerStatus: {
+            status: bar?.dataset?.composerStatus ?? null,
+            hasStopButton: !!stopBtn,
+          },
         };
       });
 
@@ -802,9 +1014,9 @@ async function main() {
       container.find('.monaco-scrollable-element > .scrollbar').remove();
 
       const html = container.html() || '';
-      const result = { ok: true, html, stylesHash, themeInfo };
+      const result = { ok: true, html, stylesHash, themeInfo, composerStatus };
       if (styles !== null) result.styles = styles;
-      console.log('[chat-content] mode=%s tab=%d html=%dKB styles=%s', mode, tab,
+      console.log('[chat-content] tab=%d html=%dKB styles=%s', tab,
         (html.length / 1024) | 0, styles ? ((styles.length / 1024) | 0) + 'KB' : 'cached');
       res.json(result);
     } catch (e) {
@@ -823,9 +1035,10 @@ async function main() {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
     const r = await runNode(resizeScript, ['--host', host, '--port', String(port), '--info', '--verbose']);
-    try {
-      res.json(JSON.parse(r.out.trim().split('\n').pop()));
-    } catch {
+    const parsed = parseTrailingJson(r.out);
+    if (parsed) {
+      res.json(parsed);
+    } else {
       res.status(500).json({ ok: false, code: r.code, stdout: r.out, stderr: r.err });
     }
   });
@@ -840,10 +1053,10 @@ async function main() {
       if (height != null) args.push('-h', String(Math.round(height)));
     }
     const r = await runNode(resizeScript, args);
-    try {
-      const lines = r.out.trim().split('\n');
-      res.json(JSON.parse(lines[lines.length - 1]));
-    } catch {
+    const parsed = parseTrailingJson(r.out);
+    if (parsed) {
+      res.json(parsed);
+    } else {
       res.status(500).json({ ok: false, code: r.code, stdout: r.out, stderr: r.err });
     }
   });
@@ -925,7 +1138,7 @@ async function main() {
       }
       shuttingDown = true;
       console.log('\nShutting down server...');
-      stopWatcher();
+      stopAllWatchers();
       resetLiveCDP();
       if (typeof server.closeAllConnections === 'function') {
         server.closeAllConnections();

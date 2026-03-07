@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a2a44"/>
+      <stop offset="100%" stop-color="#2a4a6e"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <g transform="translate(256,240)">
+    <!-- Cursor arrow -->
+    <polygon points="-80,-100 80,20 10,20 30,80 -10,80 -30,20 -80,40" fill="#fff" opacity=".95"/>
+    <!-- Play triangle (auto-click) -->
+    <polygon points="30,-30 70,0 30,30" fill="#43a047"/>
+  </g>
+  <text x="256" y="430" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-weight="700" font-size="72" fill="rgba(255,255,255,.7)">AUTO</text>
+</svg>

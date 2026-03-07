@@ -11,8 +11,16 @@ function sleep(ms) {
 async function connectOverCDP({ host = '127.0.0.1', port = 9222 } = {}) {
   const url = `http://${host}:${port}`;
   const browser = await chromium.connectOverCDP(url);
-  const contexts = browser.contexts();
-  const context = contexts.length ? contexts[0] : await browser.newContext();
+  const start = Date.now();
+  let contexts = browser.contexts();
+  while (!contexts.length && Date.now() - start < 5000) {
+    await sleep(200);
+    contexts = browser.contexts();
+  }
+  if (!contexts.length) {
+    throw new Error(`No browser contexts found via CDP: ${url}`);
+  }
+  const context = contexts[0];
   return { browser, context, url };
 }
 
@@ -43,8 +51,84 @@ async function findPageWithSelector(context, {
   return null;
 }
 
+/**
+ * Extract project name from a Cursor window title.
+ * Title format: "[filename - ] projectName - profile - Cursor"
+ */
+function extractProjectName(title) {
+  const parts = (title || '').split(' - ');
+  if (parts.length >= 3 && parts[parts.length - 1].trim() === 'Cursor') {
+    return parts[parts.length - 3]?.trim() || parts[0].trim();
+  }
+  return title || 'unknown';
+}
+
+/**
+ * Find a specific Playwright page by its CDP targetId.
+ * Opens a temporary CDP session on each page to call Target.getTargetInfo.
+ */
+async function findPageByTargetId(context, targetId, timeoutMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const page of context.pages()) {
+      let session;
+      try {
+        session = await context.newCDPSession(page);
+        const { targetInfo } = await session.send('Target.getTargetInfo');
+        if (targetInfo.targetId === targetId) return page;
+      } catch {
+        // page may be closing or inaccessible
+      } finally {
+        try { await session?.detach(); } catch {}
+      }
+    }
+    await sleep(500);
+  }
+  return null;
+}
+
+/**
+ * Return all Playwright pages that contain .monaco-workbench (i.e. Cursor windows).
+ * Each entry: { page, title, targetId, project }
+ */
+async function findAllWorkbenchPages(context, { timeoutMs = 10000 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const results = [];
+    for (const page of context.pages()) {
+      let session;
+      try {
+        const hasWB = await page.evaluate(() => !!document.querySelector('.monaco-workbench'));
+        if (!hasWB) continue;
+        const title = await page.title();
+        session = await context.newCDPSession(page);
+        const { targetInfo } = await session.send('Target.getTargetInfo');
+        results.push({
+          page,
+          title,
+          targetId: targetInfo.targetId,
+          project: extractProjectName(title),
+        });
+      } catch {
+        // skip inaccessible pages
+      } finally {
+        try { await session?.detach(); } catch {}
+      }
+    }
+    if (results.length > 0) {
+      results.sort((a, b) => a.project.localeCompare(b.project));
+      return results;
+    }
+    await sleep(500);
+  }
+  return [];
+}
+
 module.exports = {
   connectOverCDP,
   findPageWithSelector,
+  findPageByTargetId,
+  findAllWorkbenchPages,
+  extractProjectName,
   sleep,
 };

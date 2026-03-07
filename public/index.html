@@ -2,10 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>cursor_auto</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Cursor Auto</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#2a3a55" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Cursor Auto" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; line-height: 1.4; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; line-height: 1.4; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+    @media (max-width: 600px) {
+      body { margin: 12px; }
+      button { padding: 12px 16px; font-size: 14px; min-height: 44px; }
+      input, select, textarea { font-size: 16px !important; min-height: 44px; }
+      .row { gap: 8px; }
+      .card { padding: 12px; }
+      h2 { font-size: 18px; }
+      .win-tab { padding: 10px 12px; font-size: 12px; }
+    }
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
     button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #efefef; }
@@ -39,32 +55,31 @@
     .ax-bar[data-ax-state="stopped"] .ax-spinner { border-top-color:#bbb; animation:none; }
     .ax-bar[data-ax-state="dead"] { background:rgba(229,57,53,0.05); border-color:rgba(229,57,53,0.2); }
     .ax-bar[data-ax-state="dead"] .ax-spinner { border-top-color:#e53935; animation:none; }
+    .ax-bar[data-ax-state="lost"] { background:rgba(229,57,53,0.05); border-color:rgba(229,57,53,0.2); }
+    .ax-bar[data-ax-state="lost"] .ax-spinner { border-top-color:#e53935; animation:none; }
     button:disabled { opacity:.45; cursor:default; }
     button:disabled:hover { background:#f7f7f7; }
+
+    .win-tabs { display:flex; gap:0; margin-bottom:16px; border-bottom:2px solid #e0e0e0; flex-wrap:wrap; }
+    .win-tab { padding:8px 16px; cursor:pointer; border:1px solid transparent; border-bottom:none; border-radius:10px 10px 0 0; background:#f7f7f7; font-size:13px; font-weight:500; color:#555; display:flex; align-items:center; gap:6px; transition:background .15s; user-select:none; }
+    .win-tab:hover { background:#efefef; }
+    .win-tab.active { background:#fff; border-color:#ddd; color:#111; position:relative; }
+    .win-tab.active::after { content:''; position:absolute; bottom:-2px; left:0; right:0; height:2px; background:#fff; }
+    .win-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; background:#bbb; }
+    .win-dot[data-st="scanning"] { background:#e53935; }
+    .win-dot[data-st="shimmer"] { background:#fb8c00; }
+    .win-dot[data-st="clicked"],.win-dot[data-st="generating"] { background:#43a047; }
+    .win-dot[data-st="paused"] { background:#90a4ae; }
+    .win-dot[data-st="init"] { background:#9e9e9e; }
   </style>
 </head>
 <body>
-  <h1>cursor_auto</h1>
-  <p class="hint">Prereq: Start Cursor/VS Code with <code>--remote-debugging-port=9222</code>. Then this page can auto-click or capture a static snapshot via CDP.</p>
-
-  <div class="card">
-    <div class="row">
-      <label>Token <input id="token" placeholder="optional" size="12" /></label>
-      <label>Host <input id="host" value="127.0.0.1" size="12" /></label>
-      <label>Port <input id="port" value="9222" size="6" /></label>
-      <label>Selector <input id="selector" value=".monaco-workbench" size="24" /></label>
-      <label>Contains <input id="contains" value="" size="10" /></label>
-    </div>
-    <div class="row">
-      <button id="btnCapture">Capture static snapshot</button>
-      <button id="btnLatest">Open latest capture</button>
-    </div>
-    <div class="row hint">
-      <span id="status">Status: (loading…)</span>
-    </div>
+  <div class="win-tabs" id="winTabs"></div>
+  <div class="row" style="margin-top:0;margin-bottom:12px">
+    <button id="btnChatViewTop" style="padding:8px 16px;border-radius:10px;border:1px solid #3b7dd8;background:#2a3a55;color:#ddd;cursor:pointer;font-weight:500">Chat View</button>
   </div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card">
     <div class="row" style="align-items:center">
       <strong>Auto Click</strong>
       <span id="axSource" class="hint"></span>
@@ -130,7 +145,6 @@
           <option value="0">Manual</option>
         </select>
       </label>
-      <button id="btnChatView" style="background:#2a3a55;border-color:#3b7dd8">Chat View</button>
       <button id="btnLiveStart">Start Live</button>
       <button id="btnLiveStop">Stop Live</button>
       <button id="btnLiveRefresh">Refresh Now</button>
@@ -169,29 +183,25 @@
 
 <script>
   const logEl = document.getElementById('log');
-  const tokenEl = document.getElementById('token');
-  const hostEl = document.getElementById('host');
-  const portEl = document.getElementById('port');
-  const selEl  = document.getElementById('selector');
-  const conEl  = document.getElementById('contains');
-  const statusEl = document.getElementById('status');
+  const urlParams = new URLSearchParams(window.location.search);
+  const DASHBOARD_HOST = urlParams.get('host') || '127.0.0.1';
+  const DASHBOARD_PORT = Number(urlParams.get('port') || 9222);
+  const DASHBOARD_TOKEN = urlParams.get('token') || '';
 
   function log(obj) {
     logEl.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
   }
 
-  function payload() {
+  function basePayload(extra = {}) {
     return {
-      host: hostEl.value.trim(),
-      port: Number(portEl.value),
-      selector: selEl.value.trim(),
-      contains: conEl.value.trim(),
+      host: DASHBOARD_HOST,
+      port: DASHBOARD_PORT,
+      ...extra,
     };
   }
 
   function authHeaders() {
-    const t = tokenEl.value.trim();
-    return t ? { 'x-token': t } : {};
+    return DASHBOARD_TOKEN ? { 'x-token': DASHBOARD_TOKEN } : {};
   }
 
   async function post(url, body) {
@@ -203,6 +213,69 @@
     return await r.json();
   }
 
+  // --- Window Tabs ---
+  const winTabsEl = document.getElementById('winTabs');
+  let selectedTargetId = '';
+  let knownWindows = [];
+
+  function renderWindowTabs() {
+    winTabsEl.innerHTML = '';
+    for (const w of knownWindows) {
+      const tab = document.createElement('div');
+      tab.className = 'win-tab' + (w.targetId === selectedTargetId ? ' active' : '');
+      const dot = document.createElement('span');
+      dot.className = 'win-dot';
+      const ind = w.indicator || {};
+      const alive = ind.exists && ind.hbAgeMs < 15000;
+      dot.dataset.st = alive ? (ind.state || 'init') : '';
+      tab.appendChild(dot);
+      tab.appendChild(document.createTextNode(w.project));
+      tab.onclick = () => { selectedTargetId = w.targetId; renderWindowTabs(); };
+      winTabsEl.appendChild(tab);
+    }
+  }
+
+  let serverFailCount = 0;
+  const SERVER_FAIL_THRESHOLD = 2;
+
+  function onServerReachable() {
+    serverFailCount = 0;
+  }
+  function onServerUnreachable() {
+    serverFailCount++;
+    if (serverFailCount >= SERVER_FAIL_THRESHOLD) {
+      showLostConnection();
+      knownWindows = [];
+      renderWindowTabs();
+    }
+  }
+
+  async function refreshWindows() {
+    try {
+      const qs = new URLSearchParams({ host: DASHBOARD_HOST, port: String(DASHBOARD_PORT) });
+      const r = await fetch('/api/windows?' + qs, { headers: authHeaders() }).then(r => r.json());
+      if (r.ok && r.windows) {
+        onServerReachable();
+        knownWindows = r.windows;
+        if (!selectedTargetId && knownWindows.length > 0) {
+          selectedTargetId = knownWindows[0].targetId;
+        }
+        if (selectedTargetId && !knownWindows.find(w => w.targetId === selectedTargetId)) {
+          selectedTargetId = knownWindows.length > 0 ? knownWindows[0].targetId : '';
+        }
+        renderWindowTabs();
+      }
+    } catch {
+      onServerUnreachable();
+    }
+  }
+
+  refreshWindows();
+  setInterval(refreshWindows, 5000);
+
+  // --- Chat View button (top, below window tabs) ---
+  document.getElementById('btnChatViewTop').onclick = () => window.open('/chat-view.html', '_blank');
+
   // --- Auto Click control panel ---
   const axBar = document.getElementById('axBar');
   const axLabel = document.getElementById('axLabel');
@@ -213,8 +286,25 @@
   const btnAxStop = document.getElementById('btnAxStop');
   const btnAxPause = document.getElementById('btnAxPause');
   const btnAxMode = document.getElementById('btnAxMode');
+  const btnClick = document.getElementById('btnClick');
 
   let axState = { exists: false };
+
+  function showLostConnection() {
+    axState = { exists: false };
+    axBar.dataset.axState = 'lost';
+    axLabel.textContent = 'lost connection';
+    axMeta.textContent = '';
+    axSource.textContent = '';
+    btnAxStartWatch.disabled = true;
+    btnAxStartScan.disabled = true;
+    btnAxStop.disabled = true;
+    btnAxPause.disabled = true;
+    btnAxPause.textContent = 'Pause';
+    btnAxMode.disabled = true;
+    btnAxMode.textContent = 'W/S';
+    btnClick.disabled = true;
+  }
 
   function updateAxUI(ind) {
     axState = ind;
@@ -249,22 +339,28 @@
     btnAxPause.textContent = paused ? 'Resume' : 'Pause';
     btnAxMode.disabled = !running;
     btnAxMode.textContent = running ? (ind.mode === 'scan' ? 'S\u2192W' : 'W\u2192S') : 'W/S';
+    btnClick.disabled = false;
   }
 
   let axPollTimer = null;
   async function pollAx() {
     try {
-      const qs = new URLSearchParams({ host: hostEl.value.trim(), port: portEl.value.trim() });
+      const qs = new URLSearchParams({ host: DASHBOARD_HOST, port: String(DASHBOARD_PORT) });
+      if (selectedTargetId) qs.set('targetId', selectedTargetId);
       const r = await fetch('/api/click/indicator?' + qs, { headers: authHeaders() }).then(r => r.json());
       if (r.ok) updateAxUI(r);
       if (r.source) axSource.textContent = '(' + r.source + ')';
-    } catch {}
+    } catch {
+      onServerUnreachable();
+    }
   }
 
   async function pollAxWithStatus() {
     try {
-      const qs = new URLSearchParams({ host: hostEl.value.trim(), port: portEl.value.trim() });
+      const qs = new URLSearchParams({ host: DASHBOARD_HOST, port: String(DASHBOARD_PORT) });
+      if (selectedTargetId) qs.set('targetId', selectedTargetId);
       const r = await fetch('/api/click/status?' + qs, { headers: authHeaders() }).then(r => r.json());
+      onServerReachable();
       if (r.ok && r.indicator) {
         updateAxUI(r.indicator);
         if (r.source) axSource.textContent = '(' + r.source + ')';
@@ -273,7 +369,9 @@
           if (combined.trim()) logEl.textContent = combined;
         }
       }
-    } catch {}
+    } catch {
+      onServerUnreachable();
+    }
   }
 
   pollAxWithStatus();
@@ -281,51 +379,39 @@
 
   btnAxStartWatch.onclick = async () => {
     log('Starting watch...');
-    const r = await post('/api/click/start', { host: hostEl.value.trim(), port: Number(portEl.value), mode: 'watch' });
+    const r = await post('/api/click/start', basePayload({ mode: 'watch' }));
     log(r);
     if (r.ok) setTimeout(pollAx, 1000);
   };
   btnAxStartScan.onclick = async () => {
     log('Starting scan...');
-    const r = await post('/api/click/start', { host: hostEl.value.trim(), port: Number(portEl.value), mode: 'scan' });
+    const r = await post('/api/click/start', basePayload({ mode: 'scan' }));
     log(r);
     if (r.ok) setTimeout(pollAx, 1000);
   };
   btnAxStop.onclick = async () => {
     log('Stopping...');
-    const r = await post('/api/click/stop', { host: hostEl.value.trim(), port: Number(portEl.value) });
+    const r = await post('/api/click/stop', basePayload());
     log(r);
     setTimeout(pollAx, 500);
   };
   btnAxPause.onclick = async () => {
     const nextPaused = !(axState.exists && axState.paused);
-    const r = await post('/api/click/pause', { host: hostEl.value.trim(), port: Number(portEl.value), paused: nextPaused });
+    const r = await post('/api/click/pause', basePayload({ paused: nextPaused }));
     log(r);
     if (r.ok) setTimeout(pollAx, 300);
   };
   btnAxMode.onclick = async () => {
     const nextMode = (axState.mode === 'scan') ? 'watch' : 'scan';
-    const r = await post('/api/click/mode', { host: hostEl.value.trim(), port: Number(portEl.value), mode: nextMode });
+    const r = await post('/api/click/mode', basePayload({ mode: nextMode }));
     log(r);
     if (r.ok) setTimeout(pollAx, 300);
   };
 
   document.getElementById('btnClick').onclick = async () => {
     log('Running...');
-    const r = await post('/api/click', payload());
+    const r = await post('/api/click', basePayload());
     log(r);
-  };
-
-  document.getElementById('btnCapture').onclick = async () => {
-    log('Capturing...');
-    const r = await post('/api/capture', payload());
-    log(r);
-  };
-
-  document.getElementById('btnLatest').onclick = async () => {
-    const r = await fetch('/api/latest', { headers: authHeaders() }).then(r => r.json());
-    if (!r.latest) return log({ ok: true, latest: null });
-    window.open(r.url, '_blank');
   };
 
   const liveWrapEl   = document.getElementById('liveWrap');
@@ -340,11 +426,12 @@
 
   function buildLiveUrl() {
     const qs = new URLSearchParams({
-      host: hostEl.value.trim(), port: portEl.value.trim(),
-      selector: selEl.value.trim(), t: Date.now(),
+      host: DASHBOARD_HOST,
+      port: String(DASHBOARD_PORT),
+      t: Date.now(),
     });
-    const tok = tokenEl.value.trim();
-    if (tok) qs.set('token', tok);
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
+    if (DASHBOARD_TOKEN) qs.set('token', DASHBOARD_TOKEN);
     return '/api/live?' + qs.toString();
   }
 
@@ -508,7 +595,6 @@
     }
   });
 
-  document.getElementById('btnChatView').onclick = () => window.open('/chat-view.html', '_blank');
   document.getElementById('btnLiveStart').onclick = startLive;
   document.getElementById('btnLiveStop').onclick = stopLive;
   document.getElementById('btnLiveRefresh').onclick = requestLiveRefresh;
@@ -547,11 +633,11 @@
     composerStatusEl.textContent = 'inserting…';
     try {
       const r = await post('/api/composer/insert', {
-        host: hostEl.value.trim(),
-        port: Number(portEl.value),
+        ...basePayload(),
         text,
         append: composerAppendEl.checked,
         send,
+        targetId: selectedTargetId,
       });
       composerStatusEl.textContent = r.ok
         ? (send ? 'sent ✓' : 'inserted ✓') + ' (' + r.lines + ' lines)'
@@ -569,8 +655,8 @@
     composerStatusEl.textContent = 'sending…';
     try {
       const r = await post('/api/composer/send', {
-        host: hostEl.value.trim(),
-        port: Number(portEl.value),
+        ...basePayload(),
+        targetId: selectedTargetId,
       });
       composerStatusEl.textContent = r.ok ? 'sent ✓' : 'error: ' + (r.error || 'unknown');
       log(r);
@@ -585,15 +671,28 @@
 
   async function doResize(body) {
     log('Resizing...');
-    const r = await post('/api/resize', { ...body, host: hostEl.value.trim(), port: Number(portEl.value) });
+    const r = await post('/api/resize', { ...basePayload(), ...body });
     log(r);
+    if (r?.ok) {
+      try {
+        const info = await fetch('/api/resize/info?' + new URLSearchParams({ host: DASHBOARD_HOST, port: String(DASHBOARD_PORT) }), { headers: authHeaders() }).then(r => r.json());
+        if (info?.ok) {
+          updateWinInfo(info.win32 || info.after || info.web || info);
+          return;
+        }
+      } catch {}
+    }
     updateWinInfo(r?.after);
   }
 
   function updateWinInfo(info) {
     if (!info) return;
-    const max = info.maximized ? ' (maximized)' : '';
-    winInfoEl.textContent = info.outerWidth + '×' + info.outerHeight + max + ' dpr=' + info.devicePixelRatio;
+    const width = info.width ?? info.outerWidth;
+    const height = info.height ?? info.outerHeight;
+    if (width == null || height == null) return;
+    const max = (info.maximized || info.zoomed) ? ' (maximized)' : '';
+    const dpr = info.devicePixelRatio ? ' dpr=' + info.devicePixelRatio : '';
+    winInfoEl.textContent = width + '×' + height + max + dpr;
   }
 
   const resizeWEl = document.getElementById('resizeW');
@@ -613,23 +712,13 @@
   };
 
   // Fetch initial window info
-  fetch('/api/resize/info?' + new URLSearchParams({ host: hostEl.value.trim(), port: portEl.value.trim() }), { headers: authHeaders() })
-    .then(r => r.json()).then(d => { if (d?.ok) updateWinInfo(d.web || d); }).catch(() => {});
+  fetch('/api/resize/info?' + new URLSearchParams({ host: DASHBOARD_HOST, port: String(DASHBOARD_PORT) }), { headers: authHeaders() })
+    .then(r => r.json()).then(d => { if (d?.ok) updateWinInfo(d.win32 || d.after || d.web || d); }).catch(() => {});
 
-  async function refreshStatus() {
-    try {
-      const qs = new URLSearchParams({ host: hostEl.value.trim(), port: String(Number(portEl.value)) });
-      const r = await fetch('/api/status?' + qs.toString(), { headers: authHeaders() }).then(r => r.json());
-      const cdp = r?.cdp?.ok ? 'CDP: ok' : 'CDP: down';
-      const latest = r?.latestUrl ? `latest: ${r.latestUrl}` : 'latest: (none)';
-      statusEl.textContent = `Status: ${cdp} | ${latest}`;
-    } catch {
-      statusEl.textContent = 'Status: (error contacting server)';
-    }
+  // --- Service Worker registration ---
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
-
-  refreshStatus();
-  setInterval(refreshStatus, 5000);
 </script>
 </body>
 </html>

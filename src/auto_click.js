@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
-const { connectOverCDP, findPageWithSelector, sleep } = require('./cdp');
+const { connectOverCDP, findPageWithSelector, findPageByTargetId, sleep } = require('./cdp');
 const indicator = require('./indicator');
 
 /**
@@ -12,8 +12,9 @@ const indicator = require('./indicator');
  */
 function findExistingProcesses() {
   try {
-    const out = execSync(
-      'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Select-Object ProcessId,CommandLine | ConvertTo-Json',
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', 'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Select-Object ProcessId,CommandLine | ConvertTo-Json'],
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const procs = JSON.parse(out);
@@ -45,18 +46,23 @@ const AGENT_LOADING_SELECTORS = [
 
 // Agent mode approval selectors
 const AGENT_APPROVAL_SEL = {
+  root: '[data-tool-status="loading"]',
   runButton: '.composer-run-button',
+  approvalRunButton: '[data-tool-status="loading"] .composer-run-button',
   skipButton: '.composer-skip-button',
   allowlistButton: '.composer-tool-call-allowlist-button',
-  allowButton: '.view-allow-btn-container .anysphere-button',
+  allowButton: '[data-tool-status="loading"] .view-allow-btn-container .anysphere-button, [data-tool-status="loading"] .view-allow-btn-container-v1 .anysphere-button',
+  allowButtonLocal: '.view-allow-btn-container .anysphere-button, .view-allow-btn-container-v1 .anysphere-button',
 };
+
+let exitCleanup = null;
 
 // ---------------------------------------------------------------------------
 // Page interaction helpers
 // ---------------------------------------------------------------------------
 
 async function clickOnce(page, { selector, containsText, requireReady, readyAttr }) {
-  return await page.evaluate(({ selector, containsText, requireReady, readyAttr }) => {
+  return await page.evaluate(async ({ selector, containsText, requireReady, readyAttr }) => {
     const nodes = Array.from(document.querySelectorAll(selector));
     const node = containsText
       ? nodes.find(n => (n.textContent || '').includes(containsText))
@@ -75,6 +81,23 @@ async function clickOnce(page, { selector, containsText, requireReady, readyAttr
     }
 
     node.scrollIntoView({ block: 'center', inline: 'center' });
+
+    const origShadow = node.style.boxShadow;
+    const origTransition = node.style.transition;
+    node.style.transition = 'box-shadow 0.1s ease-in-out';
+    const glow = '0 0 18px 6px rgba(50, 205, 50, 0.9), inset 0 0 8px rgba(50, 205, 50, 0.3)';
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+    for (let i = 0; i < 2; i++) {
+      node.style.boxShadow = glow;
+      await wait(150);
+      node.style.boxShadow = 'none';
+      await wait(120);
+    }
+
+    node.style.boxShadow = origShadow;
+    node.style.transition = origTransition;
+
     node.click();
     return { ok: true };
   }, { selector, containsText, requireReady, readyAttr });
@@ -82,7 +105,9 @@ async function clickOnce(page, { selector, containsText, requireReady, readyAttr
 
 async function detectActivity(page, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel }) {
   return await page.evaluate(({ selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel }) => {
-    const btnNodes = Array.from(document.querySelectorAll(selector));
+    const approvalRootSel = agentApprovalSel?.root || '[data-tool-status="loading"]';
+    const btnNodes = Array.from(document.querySelectorAll(selector))
+      .filter(n => !n.closest(approvalRootSel));
     const hasRun = containsText
       ? btnNodes.some(n => (n.textContent || '').includes(containsText))
       : btnNodes.length > 0;
@@ -102,18 +127,59 @@ async function detectActivity(page, { selector, containsText, shimmerSelector, a
     const toolStatuses = Array.from(document.querySelectorAll('[data-tool-status]'))
       .map(el => el.getAttribute('data-tool-status'));
     const hasToolLoading = toolStatuses.includes('loading');
-    const hasSkipButton = !!document.querySelector(agentApprovalSel?.skipButton || '.composer-skip-button');
-    const hasAllowlistButton = !!document.querySelector(agentApprovalSel?.allowlistButton || '.composer-tool-call-allowlist-button');
-    const allowBtnSel = agentApprovalSel?.allowButton || '.view-allow-btn-container .anysphere-button';
-    const hasAllowButton = !!document.querySelector(allowBtnSel);
-    const hasAgentRunButton = isAgent && btnNodes.length > 0;
-    const hasAgentApproval = isAgent && (hasSkipButton || hasAllowlistButton || hasAgentRunButton)
-      || hasAllowButton;
-
+    const approvalRoots = isAgent
+      ? Array.from(document.querySelectorAll(approvalRootSel))
+      : [];
+    const skipBtnSel = agentApprovalSel?.skipButton || '.composer-skip-button';
+    const allowlistBtnSel = agentApprovalSel?.allowlistButton || '.composer-tool-call-allowlist-button';
+    const runBtnSel = agentApprovalSel?.runButton || '.composer-run-button';
+    const allowBtnLocalSel = agentApprovalSel?.allowButtonLocal
+      || '.view-allow-btn-container .anysphere-button, .view-allow-btn-container-v1 .anysphere-button';
+    const isVisible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const isEnabled = (el) => {
+      if (!el) return false;
+      return el.getAttribute('disabled') === null
+        && el.getAttribute('data-disabled') !== 'true'
+        && el.getAttribute('aria-disabled') !== 'true';
+    };
+    const collectVisibleEnabled = (root, sel) =>
+      Array.from(root.querySelectorAll(sel)).filter(el => isVisible(el) && isEnabled(el));
+    const approvalGroups = approvalRoots
+      .map(root => {
+        const allowButtons = collectVisibleEnabled(root, allowBtnLocalSel);
+        const runButtons = collectVisibleEnabled(root, runBtnSel);
+        const skipButtons = collectVisibleEnabled(root, skipBtnSel);
+        const allowlistButtons = collectVisibleEnabled(root, allowlistBtnSel);
+        const hasDecisionPair = runButtons.length > 0 && (skipButtons.length > 0 || allowlistButtons.length > 0);
+        const isApprovalGroup = allowButtons.length > 0 || hasDecisionPair;
+        return {
+          allowButtons,
+          runButtons,
+          skipButtons,
+          allowlistButtons,
+          isApprovalGroup,
+        };
+      })
+      .filter(group => group.isApprovalGroup);
+    const hasApprovalAllowButton = approvalGroups.some(group => group.allowButtons.length > 0);
+    const hasApprovalRunButton = approvalGroups.some(group => group.runButtons.length > 0);
+    const hasApprovalSkipButton = approvalGroups.some(group => group.skipButtons.length > 0);
+    const hasApprovalAllowlistButton = approvalGroups.some(group => group.allowlistButtons.length > 0);
+    const hasAllowButton = hasApprovalAllowButton;
+    const hasSkipButton = hasApprovalSkipButton;
+    const hasAllowlistButton = hasApprovalAllowlistButton;
+    const hasAgentApproval = isAgent && approvalGroups.length > 0;
     return {
       hasRun, hasShimmer, composerStatus, hasRunningCmd,
       isAgent, hasAgentLoading, hasToolLoading,
       hasSkipButton, hasAllowlistButton, hasAllowButton, hasAgentApproval,
+      hasApprovalAllowButton, hasApprovalRunButton, hasApprovalSkipButton,
     };
   }, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel });
 }
@@ -319,6 +385,8 @@ async function main() {
     .option('tab-settle-ms', { type: 'number', default: 500, describe: 'Wait ms after switching tab before probing' })
     .option('verbose', { type: 'boolean', default: false })
     .option('force', { type: 'boolean', default: false, describe: 'Skip duplicate process check' })
+    .option('target-id', { type: 'string', default: '', describe: 'CDP target ID to lock onto (for multi-window)' })
+    .option('project', { type: 'string', default: '', describe: 'Project name (for logging, set by supervisor)' })
     .help()
     .argv;
 
@@ -344,6 +412,7 @@ async function main() {
     try { await browser.close(); } catch {}
     process.exit(code);
   }
+  exitCleanup = closeAll;
 
   process.on('SIGTERM', () => closeAll(0));
   process.on('SIGINT', () => closeAll(0));
@@ -352,15 +421,27 @@ async function main() {
   const tabSel = argv['tab-selector'] || '';
   const settleMs = argv['tab-settle-ms'];
 
-  const page = await findPageWithSelector(context, {
-    selector: '.monaco-workbench',
-    timeoutMs: argv.timeout,
-  });
-
-  if (!page) {
-    console.error('ERROR: Could not find Cursor workbench page.');
-    console.error('Tip: make sure Cursor/VS Code was started with --remote-debugging-port.');
-    await closeAll(1);
+  let page;
+  if (argv['target-id']) {
+    page = await findPageByTargetId(context, argv['target-id'], argv.timeout);
+    if (!page) {
+      console.error('ERROR: Could not find page with target-id:', argv['target-id']);
+      await closeAll(1);
+    }
+    if (argv.verbose) {
+      const t = await page.title().catch(() => '');
+      console.log(`Locked onto page: ${t} (target-id: ${argv['target-id'].substring(0, 8)}...)`);
+    }
+  } else {
+    page = await findPageWithSelector(context, {
+      selector: '.monaco-workbench',
+      timeoutMs: argv.timeout,
+    });
+    if (!page) {
+      console.error('ERROR: Could not find Cursor workbench page.');
+      console.error('Tip: make sure Cursor/VS Code was started with --remote-debugging-port.');
+      await closeAll(1);
+    }
   }
   activePage = page;
 
@@ -555,16 +636,22 @@ async function main() {
       if (activity.hasRun) {
         const r = await clickOnce(page, clickOpts);
         if (argv.verbose) console.log(r.ok ? '  >> Clicked OK' : `  >> Click failed: ${r.reason}`);
-      } else if (activity.hasAllowButton) {
+      } else if (activity.hasApprovalAllowButton) {
         const r = await clickOnce(page, {
           selector: AGENT_APPROVAL_SEL.allowButton,
           requireReady: clickOpts.requireReady,
           readyAttr: clickOpts.readyAttr,
         });
         if (argv.verbose) console.log(r.ok ? '  >> Allow clicked' : `  >> Allow click failed: ${r.reason}`);
-      } else if (activity.hasAgentApproval) {
-        const r = await clickOnce(page, { ...clickOpts, containsText: undefined });
-        if (argv.verbose) console.log(r.ok ? '  >> Agent approved' : `  >> Agent approve failed: ${r.reason}`);
+      } else if (activity.hasApprovalRunButton) {
+        const r = await clickOnce(page, {
+          selector: AGENT_APPROVAL_SEL.approvalRunButton,
+          requireReady: clickOpts.requireReady,
+          readyAttr: clickOpts.readyAttr,
+        });
+        if (argv.verbose) console.log(r.ok ? '  >> Approval run clicked' : `  >> Approval run failed: ${r.reason}`);
+      } else if (activity.hasAgentApproval && argv.verbose) {
+        console.log('  >> Approval pending, no actionable Allow/Run button found');
       }
 
     } else {
@@ -591,16 +678,22 @@ async function main() {
       if (activity.hasRun) {
         const r = await clickOnce(page, clickOpts);
         if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Clicked OK' : 'Click failed: ' + r.reason}`);
-      } else if (activity.hasAllowButton) {
+      } else if (activity.hasApprovalAllowButton) {
         const r = await clickOnce(page, {
           selector: AGENT_APPROVAL_SEL.allowButton,
           requireReady: clickOpts.requireReady,
           readyAttr: clickOpts.readyAttr,
         });
         if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Allow clicked' : 'Allow click failed: ' + r.reason}`);
+      } else if (activity.hasApprovalRunButton) {
+        const r = await clickOnce(page, {
+          selector: AGENT_APPROVAL_SEL.approvalRunButton,
+          requireReady: clickOpts.requireReady,
+          readyAttr: clickOpts.readyAttr,
+        });
+        if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Approval run clicked' : 'Approval run failed: ' + r.reason}`);
       } else if (activity.hasAgentApproval) {
-        const r = await clickOnce(page, { ...clickOpts, containsText: undefined });
-        if (argv.verbose) console.log(`[${tag}] ${r.ok ? 'Agent approved' : 'Agent approve failed: ' + r.reason}`);
+        if (argv.verbose) console.log(`[${tag}] Approval pending, no actionable Allow/Run button found`);
       } else if (argv.verbose && tag !== 'idle') {
         console.log(`[${tag}]`);
       }
@@ -625,5 +718,6 @@ async function main() {
 
 main().catch((e) => {
   console.error(e);
+  if (exitCleanup) return exitCleanup(1);
   process.exit(1);
 });

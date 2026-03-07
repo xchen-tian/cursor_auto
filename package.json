@@ -8,8 +8,8 @@
   "scripts": {
     "server": "node src/server.js",
     "click": "node src/auto_click.js --once",
-    "click:watch": "node src/auto_click.js --verbose",
-    "click:watch:scan": "node src/auto_click.js --verbose --scan-tabs",
+    "click:watch": "node src/click_supervisor.js --verbose",
+    "click:watch:scan": "node src/click_supervisor.js --verbose --scan-tabs",
     "capture": "node src/capture_static.js --selector .monaco-workbench",
     "capture:noimg": "node src/capture_static.js --selector .monaco-workbench --embed-images=false",
     "doctor": "node src/doctor.js",
