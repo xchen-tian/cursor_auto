@@ -11,6 +11,7 @@
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <style>
     * { box-sizing: border-box; }
+    html { overflow:hidden; }
     body { display:flex; flex-direction:column; height:100vh; height:100dvh; margin:0; background:#181818; color:#e4e4e4;
            font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; font-size:14px; overflow:hidden; }
     a { color:#5b9bf0; }
@@ -36,11 +37,15 @@
 
     #tabBar { flex-shrink:0; display:flex; gap:0; background:#222; border-bottom:1px solid #333;
               overflow-x:auto; scrollbar-width:thin; min-height:36px; }
-    .tab-btn { flex-shrink:0; padding:8px 16px; border:none; border-bottom:2px solid transparent;
+    .tab-btn { flex-shrink:0; padding:8px 10px 8px 16px; border:none; border-bottom:2px solid transparent;
                background:transparent; color:#888; cursor:pointer; font-size:13px; white-space:nowrap;
-               max-width:200px; overflow:hidden; text-overflow:ellipsis; }
+               max-width:200px; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:4px; }
     .tab-btn:hover { color:#ccc; background:#2a2a2a; }
     .tab-btn.active { color:#fff; border-bottom-color:#3b7dd8; }
+    .tab-close { display:none; width:16px; height:16px; border-radius:4px; border:none; background:transparent;
+                 color:#666; cursor:pointer; font-size:14px; line-height:16px; text-align:center; padding:0; flex-shrink:0; }
+    .tab-btn:hover .tab-close { display:inline-block; }
+    .tab-close:hover { background:#444; color:#eee; }
     #btnNewChat { flex-shrink:0; padding:4px 14px; border:none; border-bottom:2px solid transparent;
                   background:transparent; color:#888; cursor:pointer; font-size:18px; line-height:36px; }
     #btnNewChat:hover { color:#fff; background:#2a2a2a; }
@@ -53,15 +58,13 @@
                    border-radius:10px; padding:8px 10px; font:14px/1.4 system-ui,-apple-system,sans-serif;
                    min-height:38px; max-height:200px; outline:none; }
     #promptInput:focus { border-color:#3b7dd8; }
-    #btnSend { align-self:flex-end; padding:8px 18px; border-radius:10px; border:1px solid #3b7dd8;
-               background:#2a3a55; color:#ddd; cursor:pointer; font-size:14px; white-space:nowrap; }
+    #btnSend { align-self:flex-end; width:38px; height:38px; border-radius:10px; border:1px solid #3b7dd8;
+               background:#2a3a55; color:#ddd; cursor:pointer; font-size:18px; line-height:1; padding:0;
+               display:flex; align-items:center; justify-content:center; transition:background .15s, border-color .15s; }
     #btnSend:hover { background:#3b5588; }
     #btnSend:disabled { opacity:.4; cursor:default; }
-    #btnStop { align-self:flex-end; padding:8px 14px; border-radius:10px; border:1px solid #e53935;
-               background:#3a1a1a; color:#f88; cursor:pointer; font-size:14px; white-space:nowrap; display:none; }
-    #btnStop:hover { background:#4a2020; }
-    #btnStop:disabled { opacity:.4; cursor:default; }
-    #btnStop.visible { display:inline-block; }
+    #btnSend.stop-mode { border-color:#e53935; background:#3a1a1a; }
+    #btnSend.stop-mode:hover { background:#4a2020; }
     #sendStatus { font-size:11px; color:#888; align-self:center; white-space:nowrap; }
 
     #statusBar { flex-shrink:0; height:24px; display:flex; align-items:center; padding:0 12px;
@@ -110,8 +113,7 @@
   <div id="promptArea">
     <div id="promptInner">
       <textarea id="promptInput" rows="2" placeholder="Enter to send, Shift+Enter for newline"></textarea>
-      <button id="btnSend">Send</button>
-      <button id="btnStop" title="Stop generating">Stop</button>
+      <button id="btnSend" title="Send (Enter)">&#x2191;</button>
       <span id="sendStatus"></span>
     </div>
   </div>
@@ -124,7 +126,7 @@
   const chatFrame = document.getElementById('chatFrame');
   const promptInput = document.getElementById('promptInput');
   const btnSend = document.getElementById('btnSend');
-  const btnStop = document.getElementById('btnStop');
+  let isStopMode = false;
   const sendStatus = document.getElementById('sendStatus');
   const statusText = document.getElementById('statusText');
   const refreshSecSel = document.getElementById('refreshSec');
@@ -193,9 +195,11 @@
   }
 
   const RESPONSIVE_CSS = `
-    html, body { margin:0; padding:0; background:#181818; overflow:auto; height:auto; width:auto;
+    html, body { margin:0; padding:0; background:#181818; overflow-x:hidden; overflow-y:auto; height:auto;
+                 width:100%;
                  font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; user-select:auto; }
-    #cv-root { width:min(900px,100%); margin:0 auto; padding:clamp(10px,2.5vw,18px); padding-bottom:40px; }
+    #cv-root { width:min(900px,100%); margin:0 auto; padding:clamp(10px,2.5vw,18px); padding-bottom:40px;
+               overflow-x:hidden; }
     #cv-root * { box-sizing:border-box; }
     #cv-root [style*="max-width"] { max-width:100%!important; width:100%!important; }
     #cv-root .composer-human-message,
@@ -248,9 +252,22 @@
     tabs.forEach((t, i) => {
       const btn = document.createElement('button');
       btn.className = 'tab-btn' + (i === currentTab ? ' active' : '');
-      btn.textContent = t.title || t.label || '(untitled)';
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = t.title || t.label || '(untitled)';
+      labelSpan.style.cssText = 'overflow:hidden;text-overflow:ellipsis';
+      btn.appendChild(labelSpan);
       btn.title = t.title || t.label || '';
-      btn.onclick = () => switchTab(i);
+      btn.onclick = (e) => { if (!e.target.classList.contains('tab-close')) switchTab(i); };
+
+      if (tabs.length > 1) {
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'tab-close';
+        closeBtn.textContent = '\u00D7';
+        closeBtn.title = 'Close tab';
+        closeBtn.onclick = (e) => { e.stopPropagation(); closeTab(i); };
+        btn.appendChild(closeBtn);
+      }
+
       tabBarEl.appendChild(btn);
     });
     const addBtn = document.createElement('button');
@@ -259,6 +276,31 @@
     addBtn.title = 'New Chat';
     addBtn.onclick = newChat;
     tabBarEl.appendChild(addBtn);
+  }
+
+  async function closeTab(idx) {
+    if (tabs.length <= 1) return;
+    const label = tabs[idx]?.title || tabs[idx]?.label || '';
+    statusText.textContent = 'Closing "' + label.substring(0, 30) + '"...';
+    try {
+      const body = { tabIndex: idx };
+      if (selectedTargetId) body.targetId = selectedTargetId;
+      const r = await postJson('/api/chat-tab/close', body);
+      if (r.ok) {
+        if (idx === currentTab) {
+          currentTab = Math.max(0, idx - 1);
+        } else if (idx < currentTab) {
+          currentTab--;
+        }
+        await new Promise(res => setTimeout(res, 500));
+        await loadTabs();
+        statusText.textContent = 'Closed "' + (r.closedTab || label).substring(0, 30) + '"';
+      } else {
+        statusText.textContent = 'Close failed: ' + (r.reason || r.error || 'unknown');
+      }
+    } catch (e) {
+      statusText.textContent = 'Close error: ' + String(e.message || e);
+    }
   }
 
   async function newChat() {
@@ -277,6 +319,9 @@
     }
   }
 
+  let pendingSwitch = false;
+  let pendingSwitchIdx = -1;
+
   function switchTab(idx) {
     if (idx === currentTab) return;
     saveScrollAnchor();
@@ -284,7 +329,12 @@
     currentTab = idx;
     renderTabs();
     restoreDraft();
-    doRefresh(true);
+    if (inflight) {
+      pendingSwitch = true;
+      pendingSwitchIdx = idx;
+    } else {
+      doRefresh(true);
+    }
   }
 
   // --- Scroll anchor (operates on iframe's document) ---
@@ -422,9 +472,11 @@
 
       if (tabsR && tabsR.ok) {
         tabs = tabsR.tabs || [];
-        const cursorSelected = tabs.findIndex(t => t.selected);
-        if (cursorSelected >= 0 && cursorSelected !== currentTab) {
-          saveDraft(); currentTab = cursorSelected; restoreDraft();
+        if (!pendingSwitch) {
+          const cursorSelected = tabs.findIndex(t => t.selected);
+          if (cursorSelected >= 0 && cursorSelected !== currentTab) {
+            saveDraft(); currentTab = cursorSelected; restoreDraft();
+          }
         }
         renderTabs();
       }
@@ -435,10 +487,13 @@
       if (contentR.stylesHash) cachedStylesHash = contentR.stylesHash;
       if (contentR.themeInfo) cachedThemeInfo = contentR.themeInfo;
 
-      // Update Stop button visibility based on composer status
+      // Toggle Send/Stop mode based on composer status
       const cs = contentR.composerStatus;
       const canStop = cs && (cs.hasStopButton || cs.status === 'generating');
-      btnStop.classList.toggle('visible', !!canStop);
+      isStopMode = !!canStop;
+      btnSend.classList.toggle('stop-mode', isStopMode);
+      btnSend.innerHTML = isStopMode ? '&#x25A0;' : '&#x2191;';
+      btnSend.title = isStopMode ? 'Stop generating' : 'Send (Enter)';
 
       if (!frameInitialized) {
         initFrame(cachedStyles, cachedThemeInfo);
@@ -452,6 +507,12 @@
       statusText.textContent = 'Refresh error: ' + String(e.message || e);
     }
     inflight = false;
+    if (pendingSwitch) {
+      pendingSwitch = false;
+      currentTab = pendingSwitchIdx;
+      renderTabs();
+      doRefresh(true);
+    }
   }
 
   function scheduleRefresh() {
@@ -477,35 +538,33 @@
         promptInput.value = ''; localStorage.removeItem(draftKey());
         sendStatus.textContent = 'sent';
         scrollAnchors.set('tab:' + currentTab, { stickToBottom: true });
-        setTimeout(() => { doRefresh(false).then(scheduleRefresh); }, 800);
+        await doRefresh(false);
+        scheduleRefresh();
       } else { sendStatus.textContent = 'error: ' + (r.error || ''); }
     } catch { sendStatus.textContent = 'error'; }
     sending = false; btnSend.disabled = false;
     setTimeout(() => { if (sendStatus.textContent === 'sent') sendStatus.textContent = ''; }, 2000);
   }
-  btnSend.onclick = doSend;
-  promptInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
-  });
-
-  // --- Stop ---
   const STOP_SEL = '.send-with-mode .anysphere-icon-button[data-stop-button="true"]';
-  btnStop.onclick = async () => {
-    btnStop.disabled = true;
-    sendStatus.textContent = 'stopping...';
-    try {
-      const stopBody = { selector: STOP_SEL };
-      if (selectedTargetId) stopBody.targetId = selectedTargetId;
-      const r = await postJson('/api/remote-click', stopBody);
-      sendStatus.textContent = r.ok ? 'stopped' : 'stop failed: ' + (r.reason || r.error || '');
-      if (r.ok) {
-        btnStop.classList.remove('visible');
-        setTimeout(() => doRefresh(false).then(scheduleRefresh), 600);
-      }
-    } catch (e) { sendStatus.textContent = 'error'; }
-    btnStop.disabled = false;
-    setTimeout(() => { if (/^stopp/.test(sendStatus.textContent)) sendStatus.textContent = ''; }, 2000);
+
+  btnSend.onclick = async () => {
+    if (isStopMode) {
+      btnSend.disabled = true;
+      try {
+        const stopBody = { selector: STOP_SEL };
+        if (selectedTargetId) stopBody.targetId = selectedTargetId;
+        await postJson('/api/remote-click', stopBody);
+        await doRefresh(false);
+        scheduleRefresh();
+      } catch {}
+      btnSend.disabled = false;
+    } else {
+      doSend();
+    }
   };
+  promptInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isStopMode) doSend(); }
+  });
 
   // --- AX Status mini indicator ---
   const axMiniEl = document.getElementById('axMini');

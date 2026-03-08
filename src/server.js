@@ -878,6 +878,41 @@ async function main() {
     }
   });
 
+  // POST /api/chat-tab/close — close a chat tab by index
+  app.post('/api/chat-tab/close', async (req, res) => {
+    const { host = '127.0.0.1', port = 9222, tabIndex, targetId = '' } = req.body || {};
+    if (tabIndex == null || tabIndex < 0) {
+      return res.status(400).json({ ok: false, error: 'tabIndex is required (>= 0)' });
+    }
+    console.log('[chat-tab/close] tabIndex=%d targetId=%s', tabIndex, (targetId || '').substring(0, 8));
+
+    try {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+      const result = await state.page.evaluate(({ idx }) => {
+        const filter = (t) => {
+          if (t.closest('.tabs-container')) return false;
+          if (t.closest('.panel .composite-bar')) return false;
+          if (t.closest('.composite.bar')) return false;
+          if (t.closest('.activitybar')) return false;
+          return true;
+        };
+        const tabs = Array.from(document.querySelectorAll('[role="tab"]')).filter(filter);
+        if (idx >= tabs.length) return { ok: false, reason: 'out_of_range', total: tabs.length };
+        const tab = tabs[idx];
+        const label = (tab.getAttribute('aria-label') || tab.textContent || '').trim().substring(0, 60);
+        const closeBtn = tab.querySelector('.codicon-close.remove-button');
+        if (!closeBtn) return { ok: false, reason: 'no_close_button', label };
+        closeBtn.click();
+        return { ok: true, closedTab: label, remaining: tabs.length - 1 };
+      }, { idx: Number(tabIndex) });
+      res.json(result);
+    } catch (e) {
+      console.log('[chat-tab/close] error:', e.message);
+      resetLiveCDP();
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
   app.get('/api/chat-content', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9222);
