@@ -60,11 +60,14 @@
     #promptInput:focus { border-color:#3b7dd8; }
     #btnSend { align-self:flex-end; width:38px; height:38px; border-radius:10px; border:1px solid #3b7dd8;
                background:#2a3a55; color:#ddd; cursor:pointer; font-size:18px; line-height:1; padding:0;
-               display:flex; align-items:center; justify-content:center; transition:background .15s, border-color .15s; }
+               display:flex; align-items:center; justify-content:center; }
     #btnSend:hover { background:#3b5588; }
     #btnSend:disabled { opacity:.4; cursor:default; }
-    #btnSend.stop-mode { border-color:#e53935; background:#3a1a1a; }
-    #btnSend.stop-mode:hover { background:#4a2020; }
+    #btnStop { align-self:flex-end; width:38px; height:38px; border-radius:10px; border:1px solid #e53935;
+               background:#3a1a1a; color:#f88; cursor:pointer; font-size:16px; line-height:1; padding:0;
+               display:none; align-items:center; justify-content:center; }
+    #btnStop:hover { background:#4a2020; }
+    #btnStop.visible { display:flex; }
     #sendStatus { font-size:11px; color:#888; align-self:center; white-space:nowrap; }
 
     #statusBar { flex-shrink:0; height:24px; display:flex; align-items:center; padding:0 12px;
@@ -113,6 +116,7 @@
   <div id="promptArea">
     <div id="promptInner">
       <textarea id="promptInput" rows="2" placeholder="Enter to send, Shift+Enter for newline"></textarea>
+      <button id="btnStop" title="Stop generating">&#x25A0;</button>
       <button id="btnSend" title="Send (Enter)">&#x2191;</button>
       <span id="sendStatus"></span>
     </div>
@@ -126,7 +130,7 @@
   const chatFrame = document.getElementById('chatFrame');
   const promptInput = document.getElementById('promptInput');
   const btnSend = document.getElementById('btnSend');
-  let isStopMode = false;
+  const btnStop = document.getElementById('btnStop');
   const sendStatus = document.getElementById('sendStatus');
   const statusText = document.getElementById('statusText');
   const refreshSecSel = document.getElementById('refreshSec');
@@ -490,10 +494,7 @@
       // Toggle Send/Stop mode based on composer status
       const cs = contentR.composerStatus;
       const canStop = cs && (cs.hasStopButton || cs.status === 'generating');
-      isStopMode = !!canStop;
-      btnSend.classList.toggle('stop-mode', isStopMode);
-      btnSend.innerHTML = isStopMode ? '&#x25A0;' : '&#x2191;';
-      btnSend.title = isStopMode ? 'Stop generating' : 'Send (Enter)';
+      btnStop.classList.toggle('visible', !!canStop);
 
       if (!frameInitialized) {
         initFrame(cachedStyles, cachedThemeInfo);
@@ -547,24 +548,22 @@
   }
   const STOP_SEL = '.send-with-mode .anysphere-icon-button[data-stop-button="true"]';
 
-  btnSend.onclick = async () => {
-    if (isStopMode) {
-      btnSend.disabled = true;
-      try {
-        const stopBody = { selector: STOP_SEL };
-        if (selectedTargetId) stopBody.targetId = selectedTargetId;
-        await postJson('/api/remote-click', stopBody);
-        await doRefresh(false);
-        scheduleRefresh();
-      } catch {}
-      btnSend.disabled = false;
-    } else {
-      doSend();
-    }
-  };
+  btnSend.onclick = () => doSend();
   promptInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isStopMode) doSend(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
   });
+
+  btnStop.onclick = async () => {
+    btnStop.disabled = true;
+    try {
+      const stopBody = { selector: STOP_SEL };
+      if (selectedTargetId) stopBody.targetId = selectedTargetId;
+      await postJson('/api/remote-click', stopBody);
+      await doRefresh(false);
+      scheduleRefresh();
+    } catch {}
+    btnStop.disabled = false;
+  };
 
   // --- AX Status mini indicator ---
   const axMiniEl = document.getElementById('axMini');

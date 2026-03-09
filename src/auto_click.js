@@ -127,9 +127,7 @@ async function detectActivity(page, { selector, containsText, shimmerSelector, a
     const toolStatuses = Array.from(document.querySelectorAll('[data-tool-status]'))
       .map(el => el.getAttribute('data-tool-status'));
     const hasToolLoading = toolStatuses.includes('loading');
-    const approvalRoots = isAgent
-      ? Array.from(document.querySelectorAll(approvalRootSel))
-      : [];
+    const approvalRoots = Array.from(document.querySelectorAll(approvalRootSel));
     const skipBtnSel = agentApprovalSel?.skipButton || '.composer-skip-button';
     const allowlistBtnSel = agentApprovalSel?.allowlistButton || '.composer-tool-call-allowlist-button';
     const runBtnSel = agentApprovalSel?.runButton || '.composer-run-button';
@@ -174,7 +172,7 @@ async function detectActivity(page, { selector, containsText, shimmerSelector, a
     const hasAllowButton = hasApprovalAllowButton;
     const hasSkipButton = hasApprovalSkipButton;
     const hasAllowlistButton = hasApprovalAllowlistButton;
-    const hasAgentApproval = isAgent && approvalGroups.length > 0;
+    const hasAgentApproval = approvalGroups.length > 0;
     return {
       hasRun, hasShimmer, composerStatus, hasRunningCmd,
       isAgent, hasAgentLoading, hasToolLoading,

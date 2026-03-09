@@ -331,6 +331,85 @@ npx serve dist/site
 
 ---
 
+## Remote access via SSH tunnel
+
+If the machine running cursor_auto (Machine A) is **not directly reachable** from the machine you want to browse the dashboard on (Machine C), but there is an intermediate machine (Machine B) that both sides can reach, you can use SSH port forwarding to bridge the gap.
+
+### Typical scenario
+
+```
+  Machine C (browser, no direct route to A)
+      │
+      │  SSH over public internet
+      ▼
+  Machine B (has a public IP; can reach A over VPN / LAN)
+      │
+      │  VPN / LAN
+      ▼
+  Machine A (runs cursor_auto server on 0.0.0.0:5123)
+```
+
+- **A** runs the cursor_auto server. It is only reachable from B (e.g. via a VPN such as OpenVPN/WireGuard where A's VPN IP is `10.8.0.3`).
+- **B** is the only machine with a public IP. A and B are connected via VPN (or LAN).
+- **C** can SSH into B but has no VPN access to A.
+
+### SSH local port forwarding (recommended)
+
+Run this on **Machine C**:
+
+```bash
+ssh -L 5123:10.8.0.3:5123 user@B_PUBLIC_IP
+```
+
+| Part | Meaning |
+|------|---------|
+| `-L` | Enable local port forwarding |
+| `5123` (first) | Port to open on C's localhost |
+| `10.8.0.3` | A's address **as seen from B** (VPN/LAN IP) |
+| `5123` (second) | A's cursor_auto server port |
+| `user@B_PUBLIC_IP` | SSH login to Machine B |
+
+Then open your browser on C:
+
+```
+http://localhost:5123
+```
+
+All dashboard features (Live View, Auto Click, Composer Input, etc.) work through the tunnel because the frontend uses relative API paths (`/api/live`, `/api/click`, …).
+
+To run the tunnel in the background without an interactive shell:
+
+```bash
+ssh -fNL 5123:10.8.0.3:5123 user@B_PUBLIC_IP
+```
+
+### Alternative: reverse proxy on B
+
+For long-term or multi-device access, set up a reverse proxy (e.g. nginx) on Machine B:
+
+```nginx
+server {
+    listen 8080;
+    location / {
+        proxy_pass http://10.8.0.3:5123;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+Then any device can access `http://B_PUBLIC_IP:8080`.
+
+> **Security warning**: this exposes the dashboard to the public internet. Always enable token auth:
+>
+> ```bash
+> # On Machine A
+> CURSOR_AUTO_TOKEN=your_secret npm run server
+> ```
+>
+> Then access with `http://B_PUBLIC_IP:8080/?token=your_secret`
+
+---
+
 ## Safety
 
 - **Do NOT** expose CDP port 9222 to the internet.
