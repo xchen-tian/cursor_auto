@@ -12,7 +12,7 @@ const indicator = require('./indicator');
 async function main() {
   const doRemove = process.argv.includes('--remove');
   const portArg = process.argv.indexOf('--port');
-  const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 9222;
+  const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 9292;
 
   console.log(`Connecting to CDP on port ${port}...`);
   const { browser, context } = await connectOverCDP({ port });

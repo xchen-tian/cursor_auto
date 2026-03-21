@@ -26,6 +26,7 @@
   "description": "",
   "dependencies": {
     "cheerio": "^1.2.0",
+    "compression": "^1.8.1",
     "express": "^5.2.1",
     "mime-types": "^3.0.2",
     "playwright-core": "^1.58.2",

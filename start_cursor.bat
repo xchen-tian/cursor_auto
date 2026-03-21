@@ -1,1 +1,1 @@
-cursor --remote-debugging-port=9222 .
+cursor --remote-debugging-port=9292 .

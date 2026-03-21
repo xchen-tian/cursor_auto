@@ -7,7 +7,6 @@
   <meta name="theme-color" content="#222" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="apple-touch-icon" href="/icon-192.png" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <style>
     * { box-sizing: border-box; }
@@ -93,7 +92,7 @@
 </head>
 <body>
   <div id="topBar">
-    <a href="/" style="text-decoration:none;color:#999;font-size:13px">&lt; Dashboard</a>
+    <a id="dashboardLink" href="/" style="text-decoration:none;color:#999;font-size:13px">&lt; Dashboard</a>
     <strong>Chat View</strong>
     <label style="color:#999">Refresh
       <select id="refreshSec">
@@ -126,6 +125,11 @@
 
 <script>
 (function() {
+  const viewParams = new URLSearchParams(location.search);
+  const VIEW_HOST = viewParams.get('host') || '127.0.0.1';
+  const VIEW_PORT = Number(viewParams.get('port') || 9292);
+  const VIEW_TOKEN = viewParams.get('token') || '';
+  const INITIAL_TARGET_ID = viewParams.get('targetId') || '';
   const tabBarEl = document.getElementById('tabBar');
   const chatFrame = document.getElementById('chatFrame');
   const promptInput = document.getElementById('promptInput');
@@ -134,9 +138,10 @@
   const sendStatus = document.getElementById('sendStatus');
   const statusText = document.getElementById('statusText');
   const refreshSecSel = document.getElementById('refreshSec');
+  const dashboardLink = document.getElementById('dashboardLink');
 
   const winBarEl = document.getElementById('winBar');
-  let selectedTargetId = '';
+  let selectedTargetId = INITIAL_TARGET_ID;
   let knownWindows = [];
 
   let currentTab = -1;
@@ -219,20 +224,44 @@
     img, svg { max-width:100%; height:auto; }
   `;
 
-  function authHeaders() {
-    const t = new URLSearchParams(location.search).get('token') || '';
-    return t ? { 'x-token': t } : {};
+  function buildViewQuery(extra = {}) {
+    const qs = new URLSearchParams();
+    if (VIEW_HOST) qs.set('host', VIEW_HOST);
+    if (VIEW_PORT) qs.set('port', String(VIEW_PORT));
+    if (VIEW_TOKEN) qs.set('token', VIEW_TOKEN);
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
+    for (const [key, value] of Object.entries(extra)) {
+      if (value !== undefined && value !== null && value !== '') qs.set(key, String(value));
+    }
+    return qs.toString();
   }
+
+  function withBaseQuery(url) {
+    const u = new URL(url, location.origin);
+    if (!u.searchParams.has('host')) u.searchParams.set('host', VIEW_HOST);
+    if (!u.searchParams.has('port')) u.searchParams.set('port', String(VIEW_PORT));
+    return u.pathname + u.search;
+  }
+
+  function authHeaders() {
+    return VIEW_TOKEN ? { 'x-token': VIEW_TOKEN } : {};
+  }
+
   async function fetchJson(url) {
-    return (await fetch(url, { headers: authHeaders() })).json();
+    return (await fetch(withBaseQuery(url), { headers: authHeaders() })).json();
   }
   async function postJson(url, body) {
-    return (await fetch(url, {
+    return (await fetch(withBaseQuery(url), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ host: VIEW_HOST, port: VIEW_PORT, ...body }),
     })).json();
   }
+
+  dashboardLink.onclick = (e) => {
+    e.preventDefault();
+    location.href = '/?' + buildViewQuery();
+  };
 
   // --- Tabs ---
   async function loadTabs() {
@@ -310,7 +339,9 @@
   async function newChat() {
     statusText.textContent = 'Creating new chat...';
     try {
-      const r = await postJson('/api/composer/new-chat', {});
+      const body = {};
+      if (selectedTargetId) body.targetId = selectedTargetId;
+      const r = await postJson('/api/composer/new-chat', body);
       if (r.ok) {
         await new Promise(res => setTimeout(res, 1000));
         await loadTabs();
@@ -519,12 +550,12 @@
   function scheduleRefresh() {
     if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
     const sec = Number(refreshSecSel.value);
-    if (sec > 0 && !sending) {
-      refreshTimer = setTimeout(() => { doRefresh(false).then(scheduleRefresh); }, sec * 1000);
+    if (sec > 0) {
+      refreshTimer = setTimeout(() => { doRefresh(false).finally(scheduleRefresh); }, sec * 1000);
     }
   }
   refreshSecSel.onchange = scheduleRefresh;
-  document.getElementById('btnRefresh').onclick = () => doRefresh(false).then(scheduleRefresh);
+  document.getElementById('btnRefresh').onclick = () => doRefresh(false).finally(scheduleRefresh);
 
   // --- Send ---
   async function doSend() {

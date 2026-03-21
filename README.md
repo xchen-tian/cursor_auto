@@ -21,10 +21,10 @@ Automation utilities for **Cursor / VS Code (Electron)** by attaching to the Wor
 
 ```bash
 # Windows (PowerShell)
-& "C:\Program Files\cursor\Cursor.exe" --remote-debugging-port=9222
+& "C:\Program Files\cursor\Cursor.exe" --remote-debugging-port=9292
 
 # macOS
-open -na "Cursor" --args --remote-debugging-port=9222
+open -na "Cursor" --args --remote-debugging-port=9292
 
 # Or use the provided script
 .\start_cursor.ps1
@@ -39,7 +39,7 @@ npm run doctor
 Verify the port is open:
 
 ```bash
-curl -s http://127.0.0.1:9222/json/version
+curl -s http://127.0.0.1:9292/json/version
 ```
 
 You should see JSON with a `webSocketDebuggerUrl`.
@@ -92,7 +92,7 @@ Indicator displays: `SCAN: idle [2] 13s` / `SCAN: SHIMMER [2]` / `SCAN: RUN [2]`
 node src/auto_click.js --once \
   --selector .composer-run-button \
   --contains Fetch \
-  --host 127.0.0.1 --port 9222
+  --host 127.0.0.1 --port 9292
 ```
 
 All options:
@@ -240,7 +240,7 @@ Requests must include `x-token: change-me` header or `?token=change-me` query pa
   "append": true,
   "send": false,
   "host": "127.0.0.1",
-  "port": 9222
+  "port": 9292
 }
 ```
 
@@ -408,11 +408,93 @@ Then any device can access `http://B_PUBLIC_IP:8080`.
 >
 > Then access with `http://B_PUBLIC_IP:8080/?token=your_secret`
 
+### Reverse scenario: A accessing a service on C
+
+In the scenario above, C accesses A. But what if it's the other way around — Machine A needs to access a service running on Machine C?
+
+The challenge: A can reach B (via VPN), and C can SSH into B, but **B cannot initiate connections to C**, and **A has no route to C at all**. The only option is for C to "push" its port onto B using an SSH reverse tunnel, then A reaches it through B.
+
+```
+  Machine A (wants to access C's service)
+      │
+      │  VPN (e.g. 10.8.0.x)
+      ▼
+  Machine B (public IP, VPN IP e.g. 10.8.0.1)
+      ▲
+      │  SSH reverse tunnel (initiated by C)
+      │
+  Machine C (runs a service on port 8080)
+```
+
+**Step 1** — On Machine C, create a reverse tunnel that binds to B's **VPN IP only**:
+
+```bash
+ssh -R 10.8.0.1:18080:localhost:8080 user@B_PUBLIC_IP
+```
+
+| Part | Meaning |
+|------|---------|
+| `-R` | Remote (reverse) port forwarding — C pushes its port onto B |
+| `10.8.0.1` | Bind address on B — **B's VPN IP only**, not all interfaces |
+| `18080` | Port to open on B |
+| `localhost:8080` | C's local service |
+| `user@B_PUBLIC_IP` | SSH into B |
+
+**Step 2** — Machine A accesses the service through B's VPN IP:
+
+```
+http://10.8.0.1:18080
+```
+
+Data flow:
+
+```
+A  ──VPN──►  B (10.8.0.1:18080)  ──SSH reverse tunnel──►  C (localhost:8080)
+```
+
+**Prerequisite**: B's SSH server must allow the client to choose a bind address. Edit `/etc/ssh/sshd_config` on B:
+
+```
+GatewayPorts clientspecified
+```
+
+Then restart sshd: `sudo systemctl restart sshd`
+
+#### Why bind to the VPN IP instead of 0.0.0.0?
+
+If C runs `ssh -R 0.0.0.0:18080:...`, port 18080 listens on **all of B's network interfaces**, including the public one. Anyone on the internet who knows B's public IP can access `http://B_PUBLIC_IP:18080` — this is a security risk.
+
+By binding to `10.8.0.1` (B's VPN IP), the port is **only reachable from within the VPN**. Machines outside the VPN (the public internet) cannot connect to it at all.
+
+| Bind address | Who can reach it | Security |
+|-------------|-----------------|----------|
+| `0.0.0.0` | Everyone (public internet + VPN + localhost) | **Dangerous** |
+| `10.8.0.1` | VPN peers only (e.g. Machine A) | **Safe** |
+| `localhost` (default) | Only B itself | Safest, but A can't reach it directly |
+
+#### Extra hardening: firewall on B
+
+Even when binding to the VPN IP, you can add a firewall rule on B as defense-in-depth:
+
+```bash
+# Allow only the VPN subnet to reach the tunneled port
+iptables -A INPUT -p tcp --dport 18080 -s 10.8.0.0/24 -j ACCEPT
+iptables -A INPUT -p tcp --dport 18080 -j DROP
+```
+
+This ensures that even if the bind address is misconfigured (e.g. someone accidentally uses `0.0.0.0`), the port remains inaccessible from the public internet.
+
+To run the reverse tunnel in the background:
+
+```bash
+ssh -fNR 10.8.0.1:18080:localhost:8080 user@B_PUBLIC_IP
+```
+
 ---
 
 ## Safety
 
-- **Do NOT** expose CDP port 9222 to the internet.
+- **Do NOT** expose CDP port 9292 to the internet.
 - Keep it bound to localhost; only expose the dashboard to LAN if you need phone/tablet control.
 - Use `CURSOR_AUTO_TOKEN` when exposing the dashboard.
 
@@ -420,7 +502,7 @@ Then any device can access `http://B_PUBLIC_IP:8080`.
 
 ## Troubleshooting
 
-1. **`Could not find a page containing selector`** — Make sure Cursor is running with `--remote-debugging-port=9222`.
+1. **`Could not find a page containing selector`** — Make sure Cursor is running with `--remote-debugging-port=9292`.
 
 2. **`Found existing auto_click process(es)`** — Another instance is running. Stop it first, or use `--force`.
 

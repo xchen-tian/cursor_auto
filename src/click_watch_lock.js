@@ -6,7 +6,7 @@ function normalizeHost(host) {
 
 function normalizePort(port) {
   const n = Number(port);
-  return Number.isFinite(n) && n > 0 ? n : 9222;
+  return Number.isFinite(n) && n > 0 ? n : 9292;
 }
 
 function makeWatcherKey(host, port) {
@@ -54,7 +54,7 @@ function listNodeProcesses() {
   }
 }
 
-function findRunningClickSupervisors({ host = '127.0.0.1', port = 9222, selfPid = process.pid } = {}) {
+function findRunningClickSupervisors({ host = '127.0.0.1', port = 9292, selfPid = process.pid } = {}) {
   const wantedKey = makeWatcherKey(host, port);
   return listNodeProcesses()
     .filter(p =>
@@ -64,7 +64,7 @@ function findRunningClickSupervisors({ host = '127.0.0.1', port = 9222, selfPid 
     )
     .map(p => {
       const procHost = parseFlag(p.cmd, '--host', '127.0.0.1');
-      const procPort = parseFlag(p.cmd, '--port', '9222');
+      const procPort = parseFlag(p.cmd, '--port', '9292');
       const mode = /--scan-tabs\b/.test(p.cmd) ? 'scan' : 'watch';
       return {
         pid: p.pid,

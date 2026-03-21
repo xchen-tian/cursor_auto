@@ -9,7 +9,6 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Cursor Auto" />
-  <link rel="apple-touch-icon" href="/icon-192.png" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; line-height: 1.4; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
@@ -77,6 +76,7 @@
   <div class="win-tabs" id="winTabs"></div>
   <div class="row" style="margin-top:0;margin-bottom:12px">
     <button id="btnChatViewTop" style="padding:8px 16px;border-radius:10px;border:1px solid #3b7dd8;background:#2a3a55;color:#ddd;cursor:pointer;font-weight:500">Chat View</button>
+    <button id="btnFileViewTop" style="padding:8px 16px;border-radius:10px;border:1px solid #3b7dd8;background:#2a3a55;color:#ddd;cursor:pointer;font-weight:500">File View</button>
   </div>
 
   <div class="card">
@@ -185,8 +185,9 @@
   const logEl = document.getElementById('log');
   const urlParams = new URLSearchParams(window.location.search);
   const DASHBOARD_HOST = urlParams.get('host') || '127.0.0.1';
-  const DASHBOARD_PORT = Number(urlParams.get('port') || 9222);
+  const DASHBOARD_PORT = Number(urlParams.get('port') || 9292);
   const DASHBOARD_TOKEN = urlParams.get('token') || '';
+  const INITIAL_TARGET_ID = urlParams.get('targetId') || '';
 
   function log(obj) {
     logEl.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
@@ -215,8 +216,18 @@
 
   // --- Window Tabs ---
   const winTabsEl = document.getElementById('winTabs');
-  let selectedTargetId = '';
+  let selectedTargetId = INITIAL_TARGET_ID;
   let knownWindows = [];
+
+  function buildSubviewUrl(path) {
+    const qs = new URLSearchParams({
+      host: DASHBOARD_HOST,
+      port: String(DASHBOARD_PORT),
+    });
+    if (DASHBOARD_TOKEN) qs.set('token', DASHBOARD_TOKEN);
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
+    return path + '?' + qs.toString();
+  }
 
   function renderWindowTabs() {
     winTabsEl.innerHTML = '';
@@ -274,7 +285,8 @@
   setInterval(refreshWindows, 5000);
 
   // --- Chat View button (top, below window tabs) ---
-  document.getElementById('btnChatViewTop').onclick = () => window.open('/chat-view.html', '_blank');
+  document.getElementById('btnChatViewTop').onclick = () => window.open(buildSubviewUrl('/chat-view.html'), '_blank');
+  document.getElementById('btnFileViewTop').onclick = () => window.open(buildSubviewUrl('/file-view.html'), '_blank');
 
   // --- Auto Click control panel ---
   const axBar = document.getElementById('axBar');

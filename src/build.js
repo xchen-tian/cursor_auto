@@ -95,7 +95,7 @@ async function clickBuild(page) {
 async function main() {
   const argv = yargs(hideBin(process.argv))
     .option('host', { type: 'string', default: '127.0.0.1' })
-    .option('port', { type: 'number', default: 9222 })
+    .option('port', { type: 'number', default: 9292 })
     .option('model', { type: 'string', default: '', describe: 'Model to select before building' })
     .option('list-models', { type: 'boolean', default: false, describe: 'List available models and exit' })
     .option('build', { type: 'boolean', default: true, describe: 'Click Build (use --no-build to skip)' })

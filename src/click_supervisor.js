@@ -27,7 +27,7 @@ async function discoverWindows(host, port) {
 async function main() {
   const argv = yargs(hideBin(process.argv))
     .option('host', { type: 'string', default: '127.0.0.1' })
-    .option('port', { type: 'number', default: 9222 })
+    .option('port', { type: 'number', default: 9292 })
     .option('poll-interval', { type: 'number', default: 5000, describe: 'Window discovery poll interval (ms)' })
     .option('interval', { type: 'number', default: 3000, describe: 'Auto-click check interval (forwarded to workers)' })
     .option('selector', { type: 'string', default: '.composer-run-button' })

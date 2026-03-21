@@ -370,7 +370,7 @@ class TabScheduler {
 async function main() {
   const argv = yargs(hideBin(process.argv))
     .option('host', { type: 'string', default: '127.0.0.1' })
-    .option('port', { type: 'number', default: 9222 })
+    .option('port', { type: 'number', default: 9292 })
     .option('selector', { type: 'string', default: '.composer-run-button' })
     .option('contains', { type: 'string', default: '' })
     .option('once', { type: 'boolean', default: false })

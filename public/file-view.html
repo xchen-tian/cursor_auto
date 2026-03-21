@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>File View — cursor_auto</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/vs2015.min.css" />
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html { overflow: hidden; }
+    body { display:flex; flex-direction:column; height:100vh; height:100dvh; margin:0; background:#181818; color:#e4e4e4;
+           font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; font-size:14px; overflow:hidden; }
+
+    #topBar { flex-shrink:0; display:flex; align-items:center; gap:0; height:40px;
+              background:#222; border-bottom:1px solid #333; font-size:13px; overflow-x:auto; white-space:nowrap; }
+    .top-btn { padding:0 16px; height:40px; border:none; border-bottom:2px solid transparent;
+               background:transparent; color:#888; cursor:pointer; font-size:13px; font-weight:500; }
+    .top-btn:hover { color:#ccc; background:#2a2a2a; }
+    .top-btn.active { color:#fff; border-bottom-color:#3b7dd8; }
+    .top-sep { width:1px; height:24px; background:#333; flex-shrink:0; margin:0 2px; }
+    .win-btn { flex-shrink:0; padding:5px 14px; border:none; border-bottom:2px solid transparent;
+               background:transparent; color:#777; cursor:pointer; font-size:12px; white-space:nowrap;
+               display:flex; align-items:center; gap:5px; }
+    .win-btn:hover { color:#ccc; background:#252525; }
+    .win-btn.active { color:#ddd; border-bottom-color:#5b9bf0; background:#222; }
+    .win-btn .wdot { width:6px; height:6px; border-radius:50%; flex-shrink:0; background:#555; }
+
+    #contentArea { flex:1 1 0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+
+    /* Browser mode: scrollable div */
+    #sidebarHost { flex:1 1 0; min-height:0; display:none; }
+    #sidebarHost.active { display:block; }
+
+    /* Content mode */
+    #editorWrap { flex:1; display:none; flex-direction:column; min-height:0; }
+    #editorWrap.active { display:flex; }
+    #editorTabBar { flex-shrink:0; display:flex; gap:0; background:#1e1e1e; border-bottom:1px solid #333;
+                    overflow-x:auto; scrollbar-width:thin; min-height:32px; }
+    .ed-tab { flex-shrink:0; padding:6px 10px 6px 14px; border:none; border-bottom:2px solid transparent;
+              background:transparent; color:#888; cursor:pointer; font-size:12px; white-space:nowrap;
+              max-width:200px; display:flex; align-items:center; gap:2px; }
+    .ed-tab:hover { color:#ccc; background:#252525; }
+    .ed-tab.active { color:#fff; border-bottom-color:#3b7dd8; }
+    .ed-tab-close { display:none; width:14px; height:14px; border-radius:3px; border:none; background:transparent;
+                    color:#666; cursor:pointer; font-size:13px; line-height:14px; text-align:center; padding:0; flex-shrink:0; margin-left:4px; }
+    .ed-tab:hover .ed-tab-close { display:inline-block; }
+    .ed-tab-close:hover { background:#444; color:#eee; }
+    #codeView { flex:1; min-height:0; overflow:auto; background:#1e1e1e; margin:0;
+                scrollbar-width:thin; scrollbar-color:#444 #1e1e1e; }
+    #codeView::-webkit-scrollbar { width:8px; height:8px; }
+    #codeView::-webkit-scrollbar-track { background:#1e1e1e; }
+    #codeView::-webkit-scrollbar-thumb { background:#444; border-radius:4px; }
+    #codeView::-webkit-scrollbar-thumb:hover { background:#555; }
+    #codeView pre { margin:0; padding:12px 16px;
+                    font:13px/1.5 var(--vscode-editor-font-family, 'Cascadia Code','Consolas','Courier New',monospace);
+                    font-size:var(--vscode-editor-font-size, 13px);
+                    color:var(--vscode-editor-foreground, #d4d4d4);
+                    background:var(--vscode-editor-background, #1e1e1e);
+                    white-space:pre; tab-size:4; user-select:text; -webkit-user-select:text; }
+    #codeView table { border-collapse:collapse; }
+    #codeView td { padding:0; vertical-align:top; }
+    #codeView .ln { text-align:right; padding-right:16px; user-select:none; -webkit-user-select:none;
+                    min-width:40px; color:var(--vscode-editorLineNumber-foreground, #555); font:inherit; }
+    #codeView .code { white-space:pre; tab-size:4; }
+    #codeView .hljs { background:transparent!important; padding:0!important; }
+
+    #statusBar { flex-shrink:0; height:24px; display:flex; align-items:center; padding:0 12px;
+                 background:#222; border-top:1px solid #333; font-size:11px; color:#777; }
+  </style>
+</head>
+<body>
+  <div id="topBar">
+    <button class="top-btn active" id="btnBrowser" title="File Browser">Browser</button>
+    <button class="top-btn" id="btnContent" title="Editor Content">Content</button>
+    <span class="top-sep"></span>
+    <span id="winBar" style="display:contents"></span>
+  </div>
+  <div id="contentArea">
+    <div id="sidebarHost" class="active"></div>
+    <div id="editorWrap">
+      <div id="editorTabBar"></div>
+      <div id="codeView"><pre>No file loaded</pre></div>
+    </div>
+  </div>
+  <div id="statusBar"><span id="statusText">Loading...</span></div>
+
+<script>
+(function() {
+  const viewParams = new URLSearchParams(location.search);
+  const VIEW_HOST = viewParams.get('host') || '127.0.0.1';
+  const VIEW_PORT = Number(viewParams.get('port') || 9292);
+  const VIEW_TOKEN = viewParams.get('token') || '';
+  const INITIAL_TARGET_ID = viewParams.get('targetId') || '';
+  const winBarEl = document.getElementById('winBar');
+  const sidebarHost = document.getElementById('sidebarHost');
+  const sidebarShadow = sidebarHost.attachShadow({ mode: 'open' });
+  const sidebarWrap = document.createElement('div');
+  sidebarWrap.id = 'sb-wrap';
+  sidebarShadow.appendChild(sidebarWrap);
+  const editorWrap = document.getElementById('editorWrap');
+  const editorTabBar = document.getElementById('editorTabBar');
+  const codeViewEl = document.getElementById('codeView');
+  const statusText = document.getElementById('statusText');
+  const btnBrowser = document.getElementById('btnBrowser');
+  const btnContent = document.getElementById('btnContent');
+
+  let mode = 'browser';
+  let selectedTargetId = INITIAL_TARGET_ID;
+  let knownWindows = [];
+  let editorGroup = 0;
+  let editorTabs = [];
+  let currentEdTab = -1;
+  let sidebarStylesCached = '';
+  let sidebarStylesHash = '';
+  let sidebarThemeInfo = null;
+  let sidebarStyleInjected = false;
+  let refreshTimer = null;
+  let sidebarSnapshotId = '';
+  let sidebarMaterialized = false;
+  let sidebarScanMeta = null;
+  let sidebarForceRefresh = true;
+
+  function extractFontFaces(cssText) {
+    const faces = [];
+    const rest = [];
+    let i = 0;
+    const lower = cssText.toLowerCase();
+    while (i < cssText.length) {
+      const idx = lower.indexOf('@font-face', i);
+      if (idx < 0) { rest.push(cssText.slice(i)); break; }
+      rest.push(cssText.slice(i, idx));
+      const braceStart = cssText.indexOf('{', idx);
+      if (braceStart < 0) { rest.push(cssText.slice(idx)); break; }
+      let depth = 1, j = braceStart + 1;
+      while (j < cssText.length && depth > 0) {
+        if (cssText[j] === '{') depth++;
+        else if (cssText[j] === '}') depth--;
+        j++;
+      }
+      faces.push(cssText.slice(idx, j));
+      i = j;
+    }
+    return { fontFaceCss: faces.join('\n'), otherCss: rest.join('') };
+  }
+
+  function withBaseQuery(url) {
+    const u = new URL(url, location.origin);
+    if (!u.searchParams.has('host')) u.searchParams.set('host', VIEW_HOST);
+    if (!u.searchParams.has('port')) u.searchParams.set('port', String(VIEW_PORT));
+    return u.pathname + u.search;
+  }
+
+  function authHeaders() {
+    return VIEW_TOKEN ? { 'x-token': VIEW_TOKEN } : {};
+  }
+
+  async function fetchJson(url) {
+    return (await fetch(withBaseQuery(url), { headers: authHeaders() })).json();
+  }
+
+  async function postJson(url, body) {
+    return (await fetch(withBaseQuery(url), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ host: VIEW_HOST, port: VIEW_PORT, ...body }),
+    })).json();
+  }
+
+  function setMode(m) {
+    mode = m;
+    btnBrowser.classList.toggle('active', m === 'browser');
+    btnContent.classList.toggle('active', m === 'content');
+    sidebarHost.classList.toggle('active', m === 'browser');
+    editorWrap.classList.toggle('active', m === 'content');
+    if (m === 'browser') sidebarForceRefresh = true;
+    doRefresh();
+  }
+  btnBrowser.onclick = () => setMode('browser');
+  btnContent.onclick = () => setMode('content');
+
+  // --- Windows ---
+  async function refreshWindows() {
+    try {
+      const r = await fetchJson('/api/windows');
+      if (!r.ok || !r.windows) return;
+      knownWindows = r.windows;
+      if (!selectedTargetId && knownWindows.length > 0) selectedTargetId = knownWindows[0].targetId;
+      if (selectedTargetId && !knownWindows.find(w => w.targetId === selectedTargetId))
+        selectedTargetId = knownWindows.length > 0 ? knownWindows[0].targetId : '';
+      renderWindowBtns();
+    } catch {}
+  }
+  function renderWindowBtns() {
+    winBarEl.innerHTML = '';
+    for (const w of knownWindows) {
+      const btn = document.createElement('button');
+      btn.className = 'win-btn' + (w.targetId === selectedTargetId ? ' active' : '');
+      const dot = document.createElement('span'); dot.className = 'wdot';
+      btn.appendChild(dot);
+      btn.appendChild(document.createTextNode(w.project));
+      btn.onclick = () => switchWindow(w.targetId);
+      winBarEl.appendChild(btn);
+    }
+  }
+  function switchWindow(tid) {
+    if (tid === selectedTargetId) return;
+    selectedTargetId = tid;
+    sidebarStylesCached = ''; sidebarStylesHash = ''; sidebarStyleInjected = false;
+    sidebarSnapshotId = ''; sidebarMaterialized = false; sidebarScanMeta = null; sidebarForceRefresh = true;
+    sidebarShadow.querySelectorAll('style').forEach(s => s.remove());
+    const ffEl = document.getElementById('cursor-font-faces');
+    if (ffEl) ffEl.textContent = '';
+    renderWindowBtns();
+    doRefresh();
+  }
+
+  // --- Sidebar (Browser mode) — render into div, no iframe ---
+  async function loadSidebar() {
+    statusText.textContent = 'Loading sidebar...';
+    const qs = new URLSearchParams();
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
+    if (!sidebarStylesCached) qs.set('needStyles', '1');
+    else if (sidebarStylesHash) qs.set('stylesHash', sidebarStylesHash);
+    if (sidebarForceRefresh) qs.set('force', '1');
+    try {
+      const r = await fetchJson('/api/sidebar-materialized?' + qs);
+      if (!r.ok) { statusText.textContent = 'Error: ' + (r.error || ''); return; }
+      if (r.styles != null) { sidebarStylesCached = r.styles; sidebarStylesHash = r.stylesHash || ''; }
+      if (r.stylesHash) sidebarStylesHash = r.stylesHash;
+      if (r.themeInfo) sidebarThemeInfo = r.themeInfo;
+      sidebarSnapshotId = r.snapshotId || '';
+      sidebarMaterialized = !!r.materialized;
+      sidebarScanMeta = r.scanMeta || null;
+      sidebarForceRefresh = false;
+
+      if (!sidebarStyleInjected && sidebarStylesCached) {
+        const { fontFaceCss, otherCss } = extractFontFaces(sidebarStylesCached);
+        if (fontFaceCss) {
+          let ffEl = document.getElementById('cursor-font-faces');
+          if (!ffEl) { ffEl = document.createElement('style'); ffEl.id = 'cursor-font-faces'; document.head.appendChild(ffEl); }
+          ffEl.textContent = fontFaceCss;
+        }
+        const el = document.createElement('style');
+        el.textContent = otherCss +
+          '\n:host{display:block;height:100%;overflow:hidden}' +
+          '\n#sb-wrap{height:100%;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#444 #1e1e1e}' +
+          '\n#sb-wrap::-webkit-scrollbar{width:8px}#sb-wrap::-webkit-scrollbar-track{background:#1e1e1e}#sb-wrap::-webkit-scrollbar-thumb{background:#444;border-radius:4px}' +
+          '\n.cursor-auto-materialized-tree{min-height:100%}' +
+          '\n.cursor-auto-materialized-tree .monaco-list-row{position:static!important;top:auto!important}' +
+          '\n.monaco-list-row{cursor:pointer!important}.monaco-list-row:hover{opacity:.85}';
+        sidebarShadow.insertBefore(el, sidebarWrap);
+        sidebarStyleInjected = true;
+      }
+      if (r.themeInfo?.htmlStyle) {
+        sidebarHost.setAttribute('style', r.themeInfo.htmlStyle);
+      }
+
+      const savedScroll = sidebarWrap.scrollTop;
+      sidebarWrap.innerHTML = r.html || '<div style="text-align:center;color:#666;padding:60px">No sidebar</div>';
+
+      if (sidebarMaterialized) {
+        sidebarWrap.querySelectorAll('.monaco-list-row').forEach(el => { el.style.position = 'static'; el.style.top = ''; });
+      } else {
+        sidebarWrap.querySelectorAll('*').forEach(el => {
+          const s = el.style;
+          if (s.overflow === 'hidden') s.overflow = '';
+          if (s.position === 'absolute') { s.position = 'relative'; s.inset = ''; }
+          if (s.contain) s.contain = '';
+          if (s.top && s.top !== '0px') s.top = '0';
+        });
+        sidebarWrap.querySelectorAll('.monaco-list-row').forEach(el => { el.style.position = 'static'; el.style.top = ''; });
+        sidebarWrap.querySelectorAll('.pane,.split-view-view,.split-view-container,.monaco-pane-view,.monaco-split-view2,.monaco-scrollable-element,.monaco-list,.monaco-list-rows,.pane-body,.explorer-folders-view,.explorer-viewlet,.composite,.part.sidebar').forEach(el => {
+          el.style.height = 'auto'; el.style.overflow = 'visible'; el.style.position = 'relative';
+        });
+      }
+
+      sidebarWrap.scrollTop = savedScroll;
+
+      if (!sidebarWrap._clickBound) {
+        sidebarWrap._clickBound = true;
+        sidebarWrap.addEventListener('click', (e) => {
+          const row = e.target.closest('.monaco-list-row');
+          if (!row) return;
+          const info = getSidebarRowInfo(row);
+          if (sidebarMaterialized) {
+            handleMaterializedSidebarActivate(info, false);
+            return;
+          }
+          if (info && info.index >= 0) handleSidebarClick(info.index);
+        });
+        sidebarWrap.addEventListener('dblclick', (e) => {
+          const row = e.target.closest('.monaco-list-row');
+          if (!row || row.getAttribute('aria-expanded') !== null) return;
+          const info = getSidebarRowInfo(row);
+          if (sidebarMaterialized) {
+            handleMaterializedSidebarActivate(info, true);
+            return;
+          }
+          if (info && info.index >= 0) handleSidebarDblclick(info.index);
+        });
+      }
+      const itemCount = r.itemCount || sidebarWrap.querySelectorAll('.monaco-list-row').length;
+      statusText.textContent = 'Sidebar · ' + itemCount + ' items · ' + new Date().toLocaleTimeString() + ' (' + ((r.html || '').length / 1024 | 0) + 'KB)';
+    } catch (e) { statusText.textContent = 'Error: ' + e.message; }
+  }
+
+  function getSidebarRowInfo(row) {
+    if (!row) return null;
+    if (sidebarMaterialized) {
+      return {
+        fullPath: row.dataset.materializedPath || row.querySelector('.monaco-icon-label')?.getAttribute('aria-label') || '',
+        kind: row.dataset.materializedKind || (row.getAttribute('aria-expanded') !== null ? 'directory' : 'file'),
+        virtualTop: Number(row.dataset.materializedVirtualTop || 0),
+      };
+    }
+    return {
+      index: Array.from(sidebarWrap.querySelectorAll('.monaco-list-row')).indexOf(row),
+    };
+  }
+
+  async function handleSidebarClick(idx) {
+    statusText.textContent = 'Clicking...';
+    const body = { index: idx };
+    if (selectedTargetId) body.targetId = selectedTargetId;
+    try { await postJson('/api/file-tree/click', body); await new Promise(r => setTimeout(r, 500)); await loadSidebar(); } catch {}
+  }
+  async function handleSidebarDblclick(idx) {
+    statusText.textContent = 'Opening file...';
+    const body = { index: idx, doubleClick: true };
+    if (selectedTargetId) body.targetId = selectedTargetId;
+    try { await postJson('/api/file-tree/click', body); await new Promise(r => setTimeout(r, 800)); setMode('content'); } catch {}
+  }
+
+  async function handleMaterializedSidebarActivate(info, openFile) {
+    if (!info?.fullPath) return;
+    const body = {
+      fullPath: info.fullPath,
+      kind: info.kind,
+      virtualTop: info.virtualTop,
+      snapshotId: sidebarSnapshotId,
+      doubleClick: !!openFile,
+    };
+    if (selectedTargetId) body.targetId = selectedTargetId;
+    if (!openFile && info.kind !== 'directory') return;
+    try {
+      await postJson('/api/sidebar-item/activate', body);
+      sidebarForceRefresh = true;
+      if (openFile) {
+        await new Promise(r => setTimeout(r, 800));
+        setMode('content');
+      } else {
+        await new Promise(r => setTimeout(r, 350));
+        await loadSidebar();
+      }
+    } catch (e) {
+      statusText.textContent = 'Error: ' + (e.message || e);
+    }
+  }
+
+  // --- Editor tabs ---
+  async function loadEditorTabs() {
+    const qs = selectedTargetId ? '?targetId=' + selectedTargetId : '';
+    try {
+      const r = await fetchJson('/api/editor-tabs' + qs);
+      if (!r.ok) return;
+      const g = r.groups?.[editorGroup] || r.groups?.[0];
+      editorTabs = g?.tabs || [];
+      const sel = editorTabs.findIndex(t => t.selected);
+      if (currentEdTab < 0 || currentEdTab >= editorTabs.length) currentEdTab = sel >= 0 ? sel : 0;
+      renderEditorTabs();
+    } catch {}
+  }
+  function renderEditorTabs() {
+    editorTabBar.innerHTML = '';
+    editorTabs.forEach((t, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'ed-tab' + (t.selected ? ' active' : '');
+      const label = document.createElement('span');
+      label.textContent = t.label;
+      label.style.cssText = 'overflow:hidden;text-overflow:ellipsis';
+      btn.appendChild(label);
+      btn.title = t.label;
+      btn.onclick = (e) => { if (!e.target.classList.contains('ed-tab-close')) clickEditorTab(i); };
+      if (editorTabs.length > 1) {
+        const cb = document.createElement('span'); cb.className = 'ed-tab-close'; cb.textContent = '\u00D7'; cb.title = 'Close';
+        cb.onclick = (e) => { e.stopPropagation(); closeEditorTab(i); };
+        btn.appendChild(cb);
+      }
+      editorTabBar.appendChild(btn);
+    });
+  }
+  async function closeEditorTab(idx) {
+    if (editorTabs.length <= 1) return;
+    const body = { tabIndex: idx, group: editorGroup };
+    if (selectedTargetId) body.targetId = selectedTargetId;
+    try {
+      const r = await postJson('/api/editor-tab/close', body);
+      if (r.ok) { if (idx === currentEdTab) currentEdTab = Math.max(0, idx - 1); else if (idx < currentEdTab) currentEdTab--;
+        await new Promise(r => setTimeout(r, 500)); await loadEditorTabs(); await loadEditorContent(); }
+    } catch {}
+  }
+  async function clickEditorTab(idx) {
+    statusText.textContent = 'Switching tab...';
+    const body = { tabIndex: idx, group: editorGroup };
+    if (selectedTargetId) body.targetId = selectedTargetId;
+    try {
+      const r = await postJson('/api/editor-tab/click', body);
+      if (!r.ok) { statusText.textContent = 'Tab switch failed'; return; }
+      currentEdTab = idx;
+      await new Promise(r => setTimeout(r, 800));
+      await loadEditorContent(); await loadEditorTabs();
+    } catch (e) { statusText.textContent = 'Error: ' + (e.message || e); }
+  }
+
+  // --- Editor content ---
+  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  async function loadEditorContent() {
+    const qs = new URLSearchParams();
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
+    qs.set('group', String(editorGroup));
+    try {
+      const r = await fetchJson('/api/editor-content?' + qs.toString());
+      if (!r.ok) { statusText.textContent = 'Error: ' + (r.error || ''); return; }
+      if (sidebarThemeInfo?.htmlStyle) {
+        const vars = sidebarThemeInfo.htmlStyle.match(/--[^:]+:[^;]+/g) || [];
+        codeViewEl.style.cssText = vars.join(';');
+      }
+      if (r.isImage && r.imageUrl) {
+        codeViewEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:300px;padding:20px">' +
+          '<img src="' + r.imageUrl + '" style="max-width:100%;max-height:80vh;object-fit:contain;border-radius:4px" /></div>';
+      } else if (r.text) {
+        const lang = r.language || 'text';
+        let hl;
+        try { hl = hljs.getLanguage(lang) ? hljs.highlight(r.text, { language: lang }).value : hljs.highlightAuto(r.text).value; } catch { hl = escHtml(r.text); }
+        const rows = hl.split('\n').map((line, i) => '<tr><td class="ln">' + (i+1) + '</td><td class="code">' + (line || ' ') + '</td></tr>').join('');
+        codeViewEl.innerHTML = '<pre><table>' + rows + '</table></pre>';
+      } else {
+        codeViewEl.innerHTML = '<div style="text-align:center;color:#666;padding:60px">No content</div>';
+      }
+      statusText.textContent = (r.activeTab || 'Editor') + ' · ' + (r.totalLines || 0) + ' lines · ' + (r.language || '') + ' · ' + new Date().toLocaleTimeString();
+    } catch (e) { statusText.textContent = 'Error: ' + e.message; }
+  }
+
+  // --- Refresh ---
+  async function doRefresh() {
+    try { if (mode === 'browser') await loadSidebar(); else { await loadEditorTabs(); await loadEditorContent(); } } catch {}
+  }
+  function scheduleRefresh() {
+    if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+    refreshTimer = setTimeout(() => { doRefresh().finally(scheduleRefresh); }, mode === 'browser' ? 30000 : 5000);
+  }
+
+  refreshWindows().then(() => doRefresh().finally(scheduleRefresh));
+  setInterval(refreshWindows, 8000);
+})();
+</script>
+</body>
+</html>

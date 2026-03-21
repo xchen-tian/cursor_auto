@@ -8,7 +8,7 @@ function sleep(ms) {
  * Connect to a running Electron/Chromium instance exposing a CDP endpoint.
  * Works for VS Code / Cursor when launched with --remote-debugging-port.
  */
-async function connectOverCDP({ host = '127.0.0.1', port = 9222 } = {}) {
+async function connectOverCDP({ host = '127.0.0.1', port = 9292 } = {}) {
   const url = `http://${host}:${port}`;
   const browser = await chromium.connectOverCDP(url);
   const start = Date.now();
