@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/dump-cmd.sh"
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": ".cursor/hooks/dump-cmd.sh"
+      }
+    ]
+  }
+}

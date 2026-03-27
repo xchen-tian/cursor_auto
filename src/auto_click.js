@@ -5,6 +5,7 @@ const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 const { connectOverCDP, findPageWithSelector, findPageByTargetId, sleep } = require('./cdp');
 const indicator = require('./indicator');
+const claudeCode = require('./claude_code_clicker');
 
 /**
  * Check if another auto_click process is already running.
@@ -12,20 +13,43 @@ const indicator = require('./indicator');
  */
 function findExistingProcesses() {
   try {
-    const out = execFileSync(
-      'powershell.exe',
-      ['-NoProfile', '-Command', 'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Select-Object ProcessId,CommandLine | ConvertTo-Json'],
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-    const procs = JSON.parse(out);
-    const list = Array.isArray(procs) ? procs : [procs];
     const self = process.pid;
-    return list.filter(p =>
-      p.ProcessId !== self &&
-      p.CommandLine &&
-      /auto_click\.js/.test(p.CommandLine) &&
-      !/--remove/.test(p.CommandLine)
-    ).map(p => ({ pid: p.ProcessId, cmd: p.CommandLine.substring(0, 120) }));
+    if (process.platform === 'win32') {
+      const out = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Select-Object ProcessId,CommandLine | ConvertTo-Json'],
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      const procs = JSON.parse(out);
+      const list = Array.isArray(procs) ? procs : [procs];
+      return list.filter(p =>
+        p.ProcessId !== self &&
+        p.CommandLine &&
+        /auto_click\.js/.test(p.CommandLine) &&
+        !/--remove/.test(p.CommandLine)
+      ).map(p => ({ pid: p.ProcessId, cmd: p.CommandLine.substring(0, 120) }));
+    }
+
+    const { execSync } = require('child_process');
+    const out = execSync('ps -ax -o pid=,command=', {
+      encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return out
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => {
+        const m = line.match(/^(\d+)\s+(.+)$/);
+        return m ? { pid: Number(m[1]), cmd: m[2] } : null;
+      })
+      .filter(p =>
+        p &&
+        p.pid !== self &&
+        /^(\S+\/)?node\s/.test(p.cmd) &&
+        /auto_click\.js/.test(p.cmd) &&
+        !/--remove/.test(p.cmd)
+      )
+      .map(p => ({ pid: p.pid, cmd: p.cmd.substring(0, 120) }));
   } catch {
     return [];
   }
@@ -487,6 +511,30 @@ async function main() {
   const schedulerConfig = { baseWaitMs: 3000, maxWaitMs: 300000, stepMs: 50000 };
   let scheduler = new TabScheduler(schedulerConfig);
 
+  async function checkClaudeCode() {
+    try {
+      const result = await claudeCode.scanAndApprove(argv.host, argv.port);
+      if (result.approved.length > 0) {
+        for (const a of result.approved) {
+          console.log(`[APPROVE] Claude Code: "${a.headerText}" → ${a.btnText}`);
+        }
+        try { await indicator.update(page, 'clicked', 'CC: APPROVE'); } catch {}
+        // Wait for Claude Code to finish its async focus-to-input logic,
+        // then steal focus back to the Cursor editor.
+        await sleep(500);
+        try {
+          await page.evaluate(() => {
+            const editor = document.querySelector('.editor-instance .monaco-editor [role="textbox"]')
+              || document.querySelector('.monaco-editor .inputarea');
+            if (editor) { editor.focus(); return; }
+            const workbench = document.querySelector('.monaco-workbench');
+            if (workbench) workbench.focus();
+          });
+        } catch {}
+      }
+    } catch {}
+  }
+
   try { await indicator.inject(page, initialMode); } catch (e) {
     if (argv.verbose) console.log('Indicator injection failed (non-fatal):', e.message);
   }
@@ -574,6 +622,9 @@ async function main() {
     }
 
     try {
+
+    // Check Claude Code webview permission dialogs
+    await checkClaudeCode();
 
     if (mode === 'scan') {
       // === SCAN MODE ===

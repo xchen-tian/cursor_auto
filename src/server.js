@@ -12,6 +12,7 @@ const indicator = require('./indicator');
 const { makeWatcherKey, findRunningClickSupervisors } = require('./click_watch_lock');
 const compression = require('compression');
 const { scanMaterializedSidebar, revealSidebarPath } = require('./sidebar_materialize');
+const claudeCode = require('./claude_code_clicker');
 
 // Node >= 18 provides global fetch.
 
@@ -299,6 +300,9 @@ async function main() {
     const externalWatchers = watcher?.child ? [] : findRunningClickSupervisors({ host, port });
     const hasExternalWatcher = externalWatchers.length > 0;
 
+    let claudeCodeStatus = { found: false, scanned: 0 };
+    try { claudeCodeStatus = await claudeCode.peekPermission(host, port); } catch {}
+
     res.json({
       ok: true,
       active: !!watcher?.child || hasExternalWatcher || anyAlive,
@@ -308,6 +312,7 @@ async function main() {
       params: watcher?.params || null,
       indicator: ind,
       windows,
+      claudeCode: claudeCodeStatus,
       stdoutTail: tailLines(watcher?.out, 200),
       stderrTail: tailLines(watcher?.err, 200),
       externalWatchers,
@@ -1310,25 +1315,48 @@ async function main() {
   const workspaceRootCache = new Map(); // projectName -> fsPath
   let wsStorageScanned = false;
 
+  function getWorkspaceStorageDirs() {
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    if (process.platform === 'win32') {
+      const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+      return [path.join(appData, 'Cursor', 'User', 'workspaceStorage')];
+    }
+    if (process.platform === 'darwin') {
+      return [
+        path.join(home, 'Library', 'Application Support', 'Cursor', 'User', 'workspaceStorage'),
+      ];
+    }
+    return [
+      path.join(home, '.config', 'Cursor', 'User', 'workspaceStorage'),
+      path.join(home, '.config', 'cursor', 'User', 'workspaceStorage'),
+    ];
+  }
+
   function scanWorkspaceStorage() {
-    const wsDir = path.join(process.env.APPDATA || '', 'Cursor', 'User', 'workspaceStorage');
-    if (!fs.existsSync(wsDir)) return;
-    try {
-      for (const d of fs.readdirSync(wsDir)) {
-        const wsFile = path.join(wsDir, d, 'workspace.json');
-        if (!fs.existsSync(wsFile)) continue;
-        try {
-          const data = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
-          const folderUri = data.folder || '';
-          if (!folderUri.startsWith('file:///')) continue;
-          const decoded = decodeURIComponent(folderUri.replace('file:///', '')).replace(/\//g, path.sep);
-          const normalized = /^[a-zA-Z]:/.test(decoded) ? decoded[0].toUpperCase() + decoded.slice(1) : decoded;
-          if (!fs.existsSync(normalized)) continue;
-          const projectName = path.basename(normalized);
-          workspaceRootCache.set(projectName.toLowerCase(), normalized);
-        } catch {}
-      }
-    } catch {}
+    for (const wsDir of getWorkspaceStorageDirs()) {
+      if (!fs.existsSync(wsDir)) continue;
+      try {
+        for (const d of fs.readdirSync(wsDir)) {
+          const wsFile = path.join(wsDir, d, 'workspace.json');
+          if (!fs.existsSync(wsFile)) continue;
+          try {
+            const data = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
+            const folderUri = data.folder || '';
+            if (!folderUri.startsWith('file:///')) continue;
+            let decoded;
+            if (process.platform === 'win32') {
+              decoded = decodeURIComponent(folderUri.replace('file:///', '')).replace(/\//g, path.sep);
+              if (/^[a-zA-Z]:/.test(decoded)) decoded = decoded[0].toUpperCase() + decoded.slice(1);
+            } else {
+              decoded = decodeURIComponent(folderUri.replace('file://', ''));
+            }
+            if (!fs.existsSync(decoded)) continue;
+            const projectName = path.basename(decoded);
+            workspaceRootCache.set(projectName.toLowerCase(), decoded);
+          } catch {}
+        }
+      } catch {}
+    }
     wsStorageScanned = true;
   }
 
@@ -1343,19 +1371,21 @@ async function main() {
     const cached = workspaceRootCache.get(project.toLowerCase());
     if (cached) return cached;
 
-    // Fallback: try data-resource-uri
-    const root = await state.page.evaluate((proj) => {
+    const isWin = process.platform === 'win32';
+    const root = await state.page.evaluate(({ proj, isWin }) => {
       const el = document.querySelector('[data-resource-uri]');
       if (!el) return null;
       const uri = el.getAttribute('data-resource-uri') || '';
       if (!uri.startsWith('file:///')) return null;
       try {
-        const decoded = decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, '\\');
+        const decoded = isWin
+          ? decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, '\\')
+          : decodeURIComponent(uri.replace('file://', ''));
         const idx = decoded.toLowerCase().indexOf(proj.toLowerCase());
         if (idx >= 0) return decoded.substring(0, idx + proj.length);
         return null;
       } catch { return null; }
-    }, project);
+    }, { proj: project, isWin });
 
     if (root) workspaceRootCache.set(project.toLowerCase(), root);
     return root;
@@ -1370,7 +1400,12 @@ async function main() {
       return { ok: false, status: 404, error: 'file not found' };
     }
 
-    const fileUri = 'file:///' + resolvedFullPath.replace(/\\/g, '/').replace(/^([a-zA-Z]):/, (_, d) => d.toLowerCase() + '%3A');
+    let fileUri;
+    if (process.platform === 'win32') {
+      fileUri = 'file:///' + resolvedFullPath.replace(/\\/g, '/').replace(/^([a-zA-Z]):/, (_, d) => d.toLowerCase() + '%3A');
+    } else {
+      fileUri = 'file://' + resolvedFullPath;
+    }
     await state.page.evaluate((uri) => {
       try {
         const event = new CustomEvent('vscode-open-file', { detail: { uri } });
@@ -1390,9 +1425,11 @@ async function main() {
       awaitPromise: true,
     }).catch(() => {});
 
+    // Ctrl+P on Windows/Linux, Cmd+P on macOS (modifiers: 2=Ctrl, 4=Meta)
+    const quickOpenModifier = process.platform === 'darwin' ? 4 : 2;
     const quickOpenText = path.relative(wsRoot, resolvedFullPath).replace(/\\/g, '/') || path.basename(resolvedFullPath);
-    await state.client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'p', code: 'KeyP', modifiers: 2, windowsVirtualKeyCode: 80 });
-    await state.client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'p', code: 'KeyP', modifiers: 2, windowsVirtualKeyCode: 80 });
+    await state.client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'p', code: 'KeyP', modifiers: quickOpenModifier, windowsVirtualKeyCode: 80 });
+    await state.client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'p', code: 'KeyP', modifiers: quickOpenModifier, windowsVirtualKeyCode: 80 });
     await sleep(500);
     await state.client.send('Input.insertText', { text: quickOpenText });
     await sleep(500);
@@ -1671,8 +1708,8 @@ async function main() {
       const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
       const wsRoot = await resolveWorkspaceRoot(state, targetId);
 
-      // Get active tab info from Cursor DOM
-      const info = await state.page.evaluate((gi) => {
+      const isWin = process.platform === 'win32';
+      const info = await state.page.evaluate(({ gi, isWin }) => {
         const editorPart = document.querySelector('.part.editor');
         if (!editorPart) return { activeTab: '', filePath: '' };
         const groups = editorPart.querySelectorAll('.editor-group-container');
@@ -1683,17 +1720,20 @@ async function main() {
         const activeTab = (activeTabEl?.getAttribute('aria-label') || '').trim()
           .replace(/, Editor Group \d+$/, '').replace(/, preview$/, '');
 
-        // Try to get file URI from the tab or editor
         const resourceEl = group.querySelector('[data-resource-uri]');
         let filePath = '';
         if (resourceEl) {
           const uri = resourceEl.getAttribute('data-resource-uri') || '';
           if (uri.startsWith('file:///')) {
-            filePath = decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, '\\');
+            if (isWin) {
+              filePath = decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, '\\');
+            } else {
+              filePath = decodeURIComponent(uri.replace('file://', ''));
+            }
           }
         }
         return { activeTab, filePath, groupCount: groups.length };
-      }, groupIdx);
+      }, { gi: groupIdx, isWin });
 
       let text = '';
       let totalLines = 0;
@@ -1703,8 +1743,7 @@ async function main() {
       // Try reading from filesystem — search workspace for the file
       if (!filePath && wsRoot && info.activeTab) {
         const fileName = info.activeTab;
-        // Quick check common locations first
-        const homeDir = process.env.USERPROFILE || process.env.HOME || '';
+        const homeDir = process.env.HOME || process.env.USERPROFILE || '';
         const quickPaths = [
           path.join(wsRoot, fileName),
           path.join(wsRoot, 'src', fileName),
@@ -1844,32 +1883,51 @@ async function main() {
       .filter(s => s !== '..');
 
     let filePath;
-    // Support absolute Windows paths encoded in vscode-file:// URLs, e.g.:
-    //   /api/vscode-file/c:/Program%20Files/cursor/resources/app/out/media/codicon.ttf
-    // We still enforce that the resolved file must stay within appRoot.
-    if (segments.length > 0 && /^[a-zA-Z]:$/.test(segments[0])) {
+    if (process.platform === 'win32' && segments.length > 0 && /^[a-zA-Z]:$/.test(segments[0])) {
       filePath = path.win32.join(segments[0] + '\\', ...segments.slice(1));
     } else {
       filePath = path.join(appRoot, ...segments);
     }
 
-    // Security: allow appRoot and Cursor extensions directory
     const resolvedAppRoot = path.resolve(appRoot);
     const resolvedFile = path.resolve(filePath);
     const norm = (p) => process.platform === 'win32' ? String(p).toLowerCase() : String(p);
     const fileNorm = norm(resolvedFile);
 
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
     const allowedRoots = [resolvedAppRoot];
-    const cursorExtDir = path.join(process.env.USERPROFILE || process.env.HOME || '', '.cursor', 'extensions');
+    const cursorExtDir = path.join(homeDir, '.cursor', 'extensions');
     if (fs.existsSync(cursorExtDir)) allowedRoots.push(path.resolve(cursorExtDir));
-    // Also allow common Cursor install paths (resolveAppRoot may return VS Code path instead)
-    for (const candidate of [
-      path.join(process.env.ProgramFiles || '', 'cursor', 'resources', 'app'),
-      path.join(process.env['ProgramFiles(x86)'] || '', 'cursor', 'resources', 'app'),
-      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'cursor', 'resources', 'app'),
-    ]) {
-      if (candidate && fs.existsSync(candidate) && !allowedRoots.includes(path.resolve(candidate))) {
-        allowedRoots.push(path.resolve(candidate));
+
+    if (process.platform === 'win32') {
+      for (const candidate of [
+        path.join(process.env.ProgramFiles || '', 'cursor', 'resources', 'app'),
+        path.join(process.env['ProgramFiles(x86)'] || '', 'cursor', 'resources', 'app'),
+        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'cursor', 'resources', 'app'),
+      ]) {
+        if (candidate && fs.existsSync(candidate) && !allowedRoots.includes(path.resolve(candidate))) {
+          allowedRoots.push(path.resolve(candidate));
+        }
+      }
+    } else if (process.platform === 'darwin') {
+      for (const candidate of [
+        '/Applications/Cursor.app/Contents/Resources/app',
+        path.join(homeDir, 'Applications/Cursor.app/Contents/Resources/app'),
+      ]) {
+        if (fs.existsSync(candidate) && !allowedRoots.includes(path.resolve(candidate))) {
+          allowedRoots.push(path.resolve(candidate));
+        }
+      }
+    } else {
+      for (const candidate of [
+        path.join(homeDir, '.local/share/cursor/resources/app'),
+        '/opt/cursor/resources/app',
+        '/usr/share/cursor/resources/app',
+        '/usr/lib/cursor/resources/app',
+      ]) {
+        if (fs.existsSync(candidate) && !allowedRoots.includes(path.resolve(candidate))) {
+          allowedRoots.push(path.resolve(candidate));
+        }
       }
     }
 

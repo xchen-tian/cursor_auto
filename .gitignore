@@ -24,3 +24,6 @@ stop_claude_proxy.ps1
 # Environment
 .env
 .env.*
+
+# Third-party subproject (analysis preserved in docs/cursor-local-remote-analysis.md)
+cursor-local-remote/

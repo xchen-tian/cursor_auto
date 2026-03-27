@@ -11,12 +11,21 @@ const { findRunningClickSupervisors } = require('./click_watch_lock');
  * Discover Cursor workbench windows via the CDP HTTP endpoint.
  * Returns [{ id, title, project }] for type=page targets whose title ends with " - Cursor".
  */
+function isCursorWorkbenchTarget(t) {
+  if (t.type !== 'page') return false;
+  // Match by title: old format "... - Cursor" or "... — project"
+  if (/ - Cursor(?:\s*-\s*\w+)?$/.test(t.title)) return true;
+  // Match by URL: vscode-file workbench page (reliable across Cursor versions)
+  if (t.url && /workbench\.html/.test(t.url) && /vscode-file:\/\//.test(t.url)) return true;
+  return false;
+}
+
 async function discoverWindows(host, port) {
   const url = `http://${host}:${port}/json/list`;
   const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
   const targets = await resp.json();
   return targets
-    .filter(t => t.type === 'page' && / - Cursor(?:\s*-\s*\w+)?$/.test(t.title))
+    .filter(isCursorWorkbenchTarget)
     .map(t => ({
       id: t.id,
       title: t.title,

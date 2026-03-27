@@ -53,11 +53,14 @@ async function findPageWithSelector(context, {
 
 /**
  * Extract project name from a Cursor window title.
- * Title format: "[filename - ] projectName - profile - Cursor [- suffix]"
- * Suffix can be "Untracked", "Modified", etc.
+ * Old format: "[filename - ] projectName - profile - Cursor [- suffix]"
+ * New format (2.6+): "Chat session started — projectName"
  */
 function extractProjectName(title) {
-  const parts = (title || '').split(' - ').map(s => s.trim());
+  if (!title) return 'unknown';
+
+  // Old format: split by " - ", look for "Cursor" marker
+  const parts = title.split(' - ').map(s => s.trim());
   const cursorIdx = parts.lastIndexOf('Cursor');
   if (cursorIdx >= 2) {
     return parts[cursorIdx - 2];
@@ -65,7 +68,14 @@ function extractProjectName(title) {
   if (parts.length >= 3 && parts[parts.length - 1] === 'Cursor') {
     return parts[parts.length - 3] || parts[0];
   }
-  return title || 'unknown';
+
+  // New format: "... — projectName" (em dash separator)
+  const emDashParts = title.split(/\s*\u2014\s*/);
+  if (emDashParts.length >= 2) {
+    return emDashParts[emDashParts.length - 1].trim();
+  }
+
+  return title;
 }
 
 /**

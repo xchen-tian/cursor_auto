@@ -5,7 +5,8 @@ Automation utilities for **Cursor / VS Code (Electron)** by attaching to the Wor
 ## Features
 
 1. **Auto-click** — monitor and click Workbench DOM buttons (e.g. Composer Run/Fetch), with watch mode, scan-tabs mode, and AX status indicator
-2. **Static snapshot capture** — grab the Workbench DOM as offline-viewable HTML, MHTML, and screenshot
+2. **Claude Code auto-approval** — automatically approve Claude Code extension permission dialogs (integrated into auto-click watch loop)
+3. **Static snapshot capture** — grab the Workbench DOM as offline-viewable HTML, MHTML, and screenshot
 3. **Live View** — real-time iframe preview of the Cursor UI with click forwarding (click in the preview, Cursor executes)
 4. **Composer Input** — programmatically insert text into the Cursor AI chat input and send messages via CDP
 5. **Window Resize** — resize/maximize/restore the Cursor window via Win32 API (physical pixels)
@@ -85,6 +86,18 @@ npm run click:watch:scan
 ```
 
 Indicator displays: `SCAN: idle [2] 13s` / `SCAN: SHIMMER [2]` / `SCAN: RUN [2]` / `SCAN: paused`
+
+### Claude Code auto-approval
+
+Both watch and scan modes automatically detect and approve **Claude Code extension** permission dialogs (e.g. "Allow this bash command?"). This runs on every loop iteration alongside the Composer button checks.
+
+- Scans all `vscode-webview://` CDP targets for permission dialogs
+- Clicks the "Yes" button (shortcut key `1`) when a dialog is found
+- Indicator briefly shows `CC: APPROVE` when a dialog is approved
+- Respects the same pause/resume state as the main auto-click loop
+- Does **not** steal focus — uses pure JS `click()` without `scrollIntoView` or `focus`
+
+**Technical note:** Claude Code webviews are separate renderer processes, invisible to Playwright's page tree. The auto-approval uses raw WebSocket CDP connections (`ws` module) to reach into these isolated targets.
 
 ### Customize selector/text
 

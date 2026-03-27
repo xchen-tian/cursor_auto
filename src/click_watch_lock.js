@@ -48,7 +48,12 @@ function listNodeProcesses() {
         const m = line.match(/^(\d+)\s+(.+)$/);
         return m ? { pid: Number(m[1]), cmd: m[2] } : null;
       })
-      .filter(Boolean);
+      .filter(p => {
+        if (!p) return false;
+        // Only match actual node processes (command starts with node or /path/to/node),
+        // not shell wrappers (/bin/zsh, /bin/bash) whose args happen to include "node ...".
+        return /^(\S+\/)?node\s/.test(p.cmd);
+      });
   } catch {
     return [];
   }

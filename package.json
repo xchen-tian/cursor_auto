@@ -30,6 +30,7 @@
     "express": "^5.2.1",
     "mime-types": "^3.0.2",
     "playwright-core": "^1.58.2",
+    "ws": "^8.20.0",
     "yargs": "^18.0.0"
   }
 }
