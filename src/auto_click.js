@@ -519,18 +519,6 @@ async function main() {
           console.log(`[APPROVE] Claude Code: "${a.headerText}" → ${a.btnText}`);
         }
         try { await indicator.update(page, 'clicked', 'CC: APPROVE'); } catch {}
-        // Wait for Claude Code to finish its async focus-to-input logic,
-        // then steal focus back to the Cursor editor.
-        await sleep(500);
-        try {
-          await page.evaluate(() => {
-            const editor = document.querySelector('.editor-instance .monaco-editor [role="textbox"]')
-              || document.querySelector('.monaco-editor .inputarea');
-            if (editor) { editor.focus(); return; }
-            const workbench = document.querySelector('.monaco-workbench');
-            if (workbench) workbench.focus();
-          });
-        } catch {}
       }
     } catch {}
   }

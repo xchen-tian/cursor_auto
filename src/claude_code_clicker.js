@@ -137,7 +137,13 @@ function buildCheckExpr(clickYes) {
 
   var yesBtnText = yesBtn.textContent.trim().replace(/\\s+/g, ' ');
   ${clickYes ? `
+  // Suppress focus() calls so Claude Code's post-approval handler
+  // cannot steal focus to its input box. The click works fine via CDP
+  // without the webview having OS-level focus.
+  var _origFocus = HTMLElement.prototype.focus;
+  HTMLElement.prototype.focus = function() {};
   yesBtn.click();
+  setTimeout(function() { HTMLElement.prototype.focus = _origFocus; }, 2000);
   return JSON.stringify({ found: true, clicked: true, headerText: headerText, btnText: yesBtnText });
   ` : `
   return JSON.stringify({ found: true, clicked: false, headerText: headerText, btnText: yesBtnText });
