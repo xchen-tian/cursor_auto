@@ -76,7 +76,9 @@
   <div class="win-tabs" id="winTabs"></div>
   <div class="row" style="margin-top:0;margin-bottom:12px">
     <button id="btnChatViewTop" style="padding:8px 16px;border-radius:10px;border:1px solid #3b7dd8;background:#2a3a55;color:#ddd;cursor:pointer;font-weight:500">Chat View</button>
+    <button id="btnChatV2Top" style="padding:8px 16px;border-radius:10px;border:1px solid #43a047;background:#1a3a1a;color:#ddd;cursor:pointer;font-weight:500">Chat V2</button>
     <button id="btnFileViewTop" style="padding:8px 16px;border-radius:10px;border:1px solid #3b7dd8;background:#2a3a55;color:#ddd;cursor:pointer;font-weight:500">File View</button>
+    <button id="btnClaudeTop" style="padding:8px 16px;border-radius:10px;border:1px solid #fb8c00;background:#3a2a15;color:#ffd740;cursor:pointer;font-weight:500">Claude</button>
   </div>
 
   <div class="card">
@@ -286,7 +288,15 @@
 
   // --- Chat View button (top, below window tabs) ---
   document.getElementById('btnChatViewTop').onclick = () => window.open(buildSubviewUrl('/chat-view.html'), '_blank');
+  document.getElementById('btnChatV2Top').onclick = () => window.open(buildSubviewUrl('/chat-v2.html'), '_blank');
   document.getElementById('btnFileViewTop').onclick = () => window.open(buildSubviewUrl('/file-view.html'), '_blank');
+  document.getElementById('btnClaudeTop').onclick = () => {
+    const params = new URLSearchParams();
+    if (selectedTargetId) params.set('targetId', selectedTargetId);
+    params.set('host', document.getElementById('host')?.value || '127.0.0.1');
+    params.set('port', document.getElementById('port')?.value || '9292');
+    window.open('/claude?' + params.toString(), '_blank');
+  };
 
   // --- Auto Click control panel ---
   const axBar = document.getElementById('axBar');

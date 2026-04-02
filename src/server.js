@@ -13,6 +13,7 @@ const { makeWatcherKey, findRunningClickSupervisors } = require('./click_watch_l
 const compression = require('compression');
 const { scanMaterializedSidebar, revealSidebarPath } = require('./sidebar_materialize');
 const claudeCode = require('./claude_code_clicker');
+const transcript = require('./transcript_reader');
 
 // Node >= 18 provides global fetch.
 
@@ -119,6 +120,7 @@ async function main() {
   });
 
   const publicDir = path.join(__dirname, '..', 'public');
+  app.get('/claude', (req, res) => res.sendFile(path.join(publicDir, 'claude.html')));
   app.use('/', express.static(publicDir, { etag: true, lastModified: true }));
 
   const captureBase = path.join(__dirname, '..', 'dist', 'capture');
@@ -864,7 +866,7 @@ async function main() {
 
         if (isAgent) {
           const rows = document.querySelectorAll('.agent-sidebar-cell');
-          const tabs = Array.from(rows).slice(0, 10)
+          const tabs = Array.from(rows)
             .map((r, i) => ({
               index: i,
               title: (r.querySelector('.agent-sidebar-cell-text')?.textContent || '').trim(),
@@ -890,6 +892,19 @@ async function main() {
           }));
         return { mode: 'editor', tabs };
       });
+      // Enrich tabs with sessionId by matching against JSONL transcripts
+      let projectKey = null;
+      try {
+        const title = await state.page.title().catch(() => '');
+        const projectName = extractProjectName(title);
+        projectKey = transcript.resolveProjectKey(projectName) || transcript.resolveProjectKey(title);
+        if (projectKey && result.tabs?.length) {
+          const sessions = transcript.listSessions(projectKey);
+          result.tabs = transcript.matchTabsToSessions(result.tabs, sessions);
+        }
+      } catch {}
+      result.projectKey = projectKey;
+
       res.json({ ok: true, ...result });
     } catch (e) {
       console.log('[chat-tabs] error:', e.message);
@@ -931,6 +946,205 @@ async function main() {
       resetLiveCDP();
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Model & Mode API — read/switch via CDP DOM
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/composer/mode', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9292);
+    const targetId = req.query.targetId || '';
+    try {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+      const info = await state.page.evaluate(() => {
+        const modeBtn = document.querySelector('.composer-unified-dropdown[data-mode]');
+        const modelBtn = document.querySelector('.composer-unified-dropdown-model');
+        return {
+          mode: modeBtn?.getAttribute('data-mode') || null,
+          modeText: (modeBtn?.textContent || '').trim(),
+          model: (modelBtn?.textContent || '').trim(),
+        };
+      });
+      res.json({ ok: true, ...info });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.post('/api/composer/mode', async (req, res) => {
+    const { host = '127.0.0.1', port = 9292, targetId = '', mode } = req.body || {};
+    if (!mode || !['agent', 'ask', 'plan'].includes(mode)) {
+      return res.status(400).json({ ok: false, error: 'mode must be agent, ask, or plan' });
+    }
+    try {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+      const current = await state.page.evaluate(() => {
+        return document.querySelector('.composer-unified-dropdown[data-mode]')?.getAttribute('data-mode');
+      });
+      if (current === mode) return res.json({ ok: true, mode, changed: false });
+
+      const modeBtn = await state.page.$('.composer-unified-dropdown[data-mode]');
+      if (!modeBtn) return res.status(404).json({ ok: false, error: 'mode button not found' });
+      await modeBtn.click();
+      await sleep(300);
+
+      const clicked = await state.page.evaluate((targetMode) => {
+        const items = document.querySelectorAll('.composer-unified-context-menu-item');
+        for (const item of items) {
+          const label = item.querySelector('.monaco-highlighted-label');
+          const text = (label?.textContent || item.textContent || '').trim().toLowerCase();
+          if (text === targetMode || text.startsWith(targetMode)) {
+            item.click();
+            return { ok: true, text };
+          }
+        }
+        return { ok: false, reason: 'option_not_found' };
+      }, mode);
+
+      await sleep(200);
+      res.json({ ok: clicked.ok, mode, changed: true, detail: clicked });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/composer/models', async (req, res) => {
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9292);
+    const targetId = req.query.targetId || '';
+    try {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+      const modelBtn = await state.page.$('.composer-unified-dropdown-model');
+      if (!modelBtn) return res.json({ ok: true, models: [], current: '' });
+
+      const current = await state.page.evaluate(() =>
+        (document.querySelector('.composer-unified-dropdown-model')?.textContent || '').trim()
+      );
+      await modelBtn.click();
+      await sleep(500);
+
+      const models = await state.page.evaluate(() => {
+        let items = document.querySelectorAll('.composer-unified-context-menu-item');
+        if (!items.length) items = document.querySelectorAll('.context-view .monaco-list-row, .context-view [role="option"]');
+        return Array.from(items).map(el => {
+          const label = el.querySelector('.monaco-highlighted-label');
+          return {
+            label: (label?.textContent || el.textContent || '').trim().substring(0, 60),
+            selected: el.classList.contains('selected') || el.getAttribute('aria-selected') === 'true',
+          };
+        }).filter(m => m.label.length > 0);
+      });
+
+      await state.page.keyboard.press('Escape');
+      res.json({ ok: true, current, models });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.post('/api/composer/model', async (req, res) => {
+    const { host = '127.0.0.1', port = 9292, targetId = '', model } = req.body || {};
+    if (!model) return res.status(400).json({ ok: false, error: 'model is required' });
+    try {
+      const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
+      const modelBtn = await state.page.$('.composer-unified-dropdown-model');
+      if (!modelBtn) return res.status(404).json({ ok: false, error: 'model button not found' });
+
+      await modelBtn.click();
+      await sleep(500);
+
+      const clicked = await state.page.evaluate((targetModel) => {
+        let items = document.querySelectorAll('.composer-unified-context-menu-item');
+        if (!items.length) items = document.querySelectorAll('.context-view .monaco-list-row, .context-view [role="option"]');
+        const lower = targetModel.toLowerCase();
+        for (const item of items) {
+          const label = item.querySelector('.monaco-highlighted-label');
+          const text = (label?.textContent || item.textContent || '').trim();
+          if (text.toLowerCase().includes(lower)) {
+            item.click();
+            return { ok: true, label: text };
+          }
+        }
+        return { ok: false, reason: 'model_not_found' };
+      }, model);
+
+      if (!clicked.ok) await state.page.keyboard.press('Escape');
+      await sleep(200);
+      res.json({ ok: clicked.ok, model, detail: clicked });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Transcript API — read JSONL agent transcripts from filesystem
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/transcript/projects', (req, res) => {
+    try {
+      res.json({ ok: true, projects: transcript.listProjects() });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/transcript/sessions', async (req, res) => {
+    const projectKey = String(req.query.projectKey || '');
+    if (!projectKey) return res.status(400).json({ ok: false, error: 'projectKey required' });
+    const enrichTitles = req.query.enrichTitles === '1';
+    const host = String(req.query.host || '127.0.0.1');
+    const port = Number(req.query.port || 9292);
+    const targetId = req.query.targetId || '';
+    try {
+      const sessions = transcript.listSessions(projectKey);
+
+      if (enrichTitles) {
+        try {
+          const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 8000 });
+          const cursorTitles = await state.page.evaluate(() => {
+            if (!document.body.classList.contains('agent-unification-enabled')) return [];
+            return Array.from(document.querySelectorAll('.agent-sidebar-cell'))
+              .map(r => (r.querySelector('.agent-sidebar-cell-text')?.textContent || '').trim())
+              .filter(t => t.length > 0 && t !== 'More');
+          });
+          if (cursorTitles.length > 0) {
+            for (let i = 0; i < Math.min(sessions.length, cursorTitles.length); i++) {
+              sessions[i].cursorTitle = cursorTitles[i];
+            }
+          }
+        } catch {}
+      }
+
+      res.json({ ok: true, sessions });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/transcript/messages', (req, res) => {
+    const projectKey = String(req.query.projectKey || '');
+    const sessionId = String(req.query.sessionId || '');
+    if (!projectKey || !sessionId) {
+      return res.status(400).json({ ok: false, error: 'projectKey and sessionId required' });
+    }
+    const parseThinking = req.query.parseThinking !== '0';
+    try {
+      const result = transcript.parseMessages(projectKey, sessionId, { parseThinking });
+      res.json({ ok: true, ...result });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/transcript/mtime', (req, res) => {
+    const projectKey = String(req.query.projectKey || '');
+    const sessionId = String(req.query.sessionId || '');
+    if (!projectKey || !sessionId) {
+      return res.status(400).json({ ok: false, error: 'projectKey and sessionId required' });
+    }
+    res.json({ ok: true, mtime: transcript.getSessionMtime(projectKey, sessionId) });
   });
 
   app.get('/api/chat-content', async (req, res) => {
@@ -1960,11 +2174,80 @@ async function main() {
     const server = app.listen(port, host, () => {
       console.log(`cursor_auto server: http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
       if (requireAuth) console.log('Auth enabled: provide header x-token or ?token=...');
+      console.log(`Claude terminal:    http://${host === '0.0.0.0' ? 'localhost' : host}:${port}/claude`);
       console.log('Static captures served at /captures/<timestamp>/index.html');
       console.log('Press Ctrl+C to stop.');
     });
 
     server.on('error', reject);
+
+    // ---- Claude Code PTY: project scanner + WebSocket endpoint ----------
+    const WebSocket = require('ws');
+    const { handleConnection } = require('./claude_pty_server');
+    const claudeWss = new WebSocket.Server({ noServer: true });
+
+    function scanClaudeProjects() {
+      const projects = [];
+      for (const wsDir of getWorkspaceStorageDirs()) {
+        if (!fs.existsSync(wsDir)) continue;
+        try {
+          for (const d of fs.readdirSync(wsDir)) {
+            const wsFile = path.join(wsDir, d, 'workspace.json');
+            if (!fs.existsSync(wsFile)) continue;
+            try {
+              const data = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
+              const uri = data.folder || '';
+              if (uri.startsWith('file:///')) {
+                let cwd;
+                if (process.platform === 'win32') {
+                  cwd = decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, path.sep);
+                  if (/^[a-zA-Z]:/.test(cwd)) cwd = cwd[0].toUpperCase() + cwd.slice(1);
+                } else {
+                  cwd = decodeURIComponent(uri.replace('file://', ''));
+                }
+                if (!fs.existsSync(cwd)) continue;
+                projects.push({ type: 'local', host: null, cwd, project: path.basename(cwd) });
+              } else if (uri.startsWith('vscode-remote://ssh-remote')) {
+                const afterScheme = uri.replace('vscode-remote://ssh-remote', '');
+                const plusIdx = afterScheme.indexOf('/');
+                if (plusIdx < 0) continue;
+                let rawHost = decodeURIComponent(afterScheme.slice(0, plusIdx).replace(/^%2B|^\+/, ''));
+                if (/^[0-9a-f]+$/i.test(rawHost) && rawHost.length > 8) {
+                  try { rawHost = Buffer.from(rawHost, 'hex').toString('utf8'); } catch {}
+                }
+                if (rawHost.startsWith('{')) {
+                  try { rawHost = JSON.parse(rawHost).hostName || rawHost; } catch {}
+                }
+                const cwd = decodeURIComponent(afterScheme.slice(plusIdx));
+                projects.push({ type: 'ssh', host: rawHost, cwd, project: path.basename(cwd) });
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+      const seen = new Set();
+      return projects.filter(p => {
+        const key = `${p.type}:${p.host || ''}:${p.cwd}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    app.get('/api/claude/projects', (req, res) => {
+      res.json(scanClaudeProjects());
+    });
+
+    server.on('upgrade', (req, socket, head) => {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      if (url.pathname === '/api/claude/ws') {
+        claudeWss.handleUpgrade(req, socket, head, (ws) => {
+          handleConnection(ws);
+        });
+      } else {
+        socket.destroy();
+      }
+    });
 
     let shuttingDown = false;
     const shutdown = () => {

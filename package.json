@@ -18,7 +18,9 @@
     "build:models": "node src/build.js --list-models --verbose",
     "resize": "node src/resize_window.js",
     "resize:info": "node src/resize_window.js --info",
-    "help": "node src/auto_click.js --help"
+    "help": "node src/auto_click.js --help",
+    "claude": "node src/claude_code_pty.js",
+    "claude:verbose": "node src/claude_code_pty.js --verbose"
   },
   "keywords": [],
   "author": "",
@@ -29,7 +31,10 @@
     "compression": "^1.8.1",
     "express": "^5.2.1",
     "mime-types": "^3.0.2",
+    "node-pty": "^1.1.0",
     "playwright-core": "^1.58.2",
+    "ssh-config": "^5.1.0",
+    "ssh2": "^1.17.0",
     "ws": "^8.20.0",
     "yargs": "^18.0.0"
   }

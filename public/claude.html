@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Claude Code Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #1a1a2e; color: #e0e0e0; font-family: system-ui, -apple-system, sans-serif; }
+
+    #tabs {
+      display: flex; gap: 0; flex-wrap: wrap; padding: 0 8px;
+    }
+    .tab {
+      padding: 8px 16px; cursor: pointer; border: 1px solid transparent; border-bottom: none;
+      border-radius: 8px 8px 0 0; background: #1e293b; font-size: 13px; font-weight: 500;
+      color: #94a3b8; display: flex; align-items: center; gap: 6px; transition: background .15s;
+      user-select: none; white-space: nowrap;
+    }
+    .tab:hover { background: #334155; }
+    .tab.active { background: #1a1a2e; border-color: #0f3460; color: #e0e0e0; position: relative; }
+    .tab.active::after { content: ''; position: absolute; bottom: -2px; left: 0; right: 0; height: 2px; background: #1a1a2e; }
+    .tab .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .tab .dot.local { background: #22c55e; }
+    .tab .dot.ssh { background: #fb8c00; }
+
+
+    #btn-ax { font-weight: 700; min-width: 70px; text-align: center; }
+    #btn-ax.on  { background: #166534; border-color: #22c55e; color: #bbf7d0; }
+    #btn-ax.off { background: #7f1d1d; border-color: #ef4444; color: #fecaca; }
+
+    .status { font-size: 11px; color: #64748b; }
+    .status .count { color: #facc15; font-weight: 600; }
+
+    #terminal-container { flex: 1; overflow: hidden; position: relative; }
+    #terminal-container .xterm { height: 100%; }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+
+    .overlay {
+      display: none; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; position: absolute; inset: 0; background: rgba(0,0,0,0.75); z-index: 10;
+      font-size: 16px; color: #94a3b8;
+    }
+    .overlay.show { display: flex; }
+    .overlay button {
+      padding: 10px 28px; border-radius: 8px; font-size: 15px; font-weight: 600;
+      border: 1px solid #22c55e; background: #166534; color: #bbf7d0; cursor: pointer;
+    }
+    .overlay button:hover { background: #15803d; }
+    .overlay .sub { font-size: 13px; color: #64748b; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div style="display:flex;align-items:center;background:#16213e;border-bottom:1px solid #0f3460;">
+      <div id="tabs" style="flex:1;"></div>
+      <button id="btn-ax" class="on" style="margin:0 10px;">AX ●</button>
+    </div>
+    <div id="terminal-container">
+      <div class="overlay show" id="overlay">
+        <div id="overlay-msg">Loading...</div>
+        <button id="btn-connect" style="display:none">Connect</button>
+        <div class="sub" id="overlay-sub"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
+  <script>
+    const THEME = {
+      background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#e0e0e0',
+      selectionBackground: '#3b4261',
+      black: '#1a1a2e', red: '#e53935', green: '#43a047', yellow: '#fb8c00',
+      blue: '#1e88e5', magenta: '#8e24aa', cyan: '#00acc1', white: '#d4d4d4',
+      brightBlack: '#757575', brightRed: '#ff5252', brightGreen: '#69f0ae',
+      brightYellow: '#ffd740', brightBlue: '#448aff', brightMagenta: '#e040fb',
+      brightCyan: '#18ffff', brightWhite: '#ffffff',
+    };
+
+    const term = new Terminal({
+      theme: THEME,
+      fontFamily: '"Cascadia Code", Consolas, Menlo, "DejaVu Sans Mono", monospace',
+      fontSize: 14, cursorBlink: true, allowProposedApi: true,
+    });
+    window.term = term;
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal-container'));
+    fitAddon.fit();
+
+    // ---- State ----------------------------------------------------------
+
+    const tabsEl = document.getElementById('tabs');
+    const btnAx = document.getElementById('btn-ax');
+    const approveCountEl = { textContent: '' }; // hidden counter
+    const overlay = document.getElementById('overlay');
+    const overlayMsg = document.getElementById('overlay-msg');
+    const overlaySub = document.getElementById('overlay-sub');
+    const btnConnect = document.getElementById('btn-connect');
+
+    let ws = null;
+    let watchActive = true;
+    let approveCount = 0;
+    let lastApproveTs = 0;
+    let debounceTimer = null;
+    let windowList = [];
+    let projectList = [];
+    let selectedWindow = null;
+
+    // ---- Client-side prompt detection -----------------------------------
+
+    const PROMPT_PATTERNS = [
+      /Do you want to\s+\w/i,
+      /wants to\s+(create|run|execute|write|edit|read|delete|access|fetch|proceed)/i,
+      /requires confirmation/i,
+      /allow\s+(this|the|tool)/i,
+      /\bYes\b[\s\S]{0,200}\bNo\b/,
+    ];
+    const DIALOG_COMPLETE_RE = /Esc to cancel|Tab to amend|ctrl\+e to explain/i;
+    const RUNNING_RE = /esc to interrupt/;
+
+    function getScreenLines() {
+      const buf = term.buffer.active;
+      const lines = [];
+      const start = buf.baseY + buf.cursorY - term.rows + 1;
+      const viewStart = Math.max(0, buf.length - term.rows);
+      for (let i = 0; i < term.rows; i++) {
+        const l = buf.getLine(viewStart + i);
+        lines.push(l ? l.translateToString(true) : '');
+      }
+      return lines;
+    }
+
+    function detectPrompt(text) {
+      for (const re of PROMPT_PATTERNS) { if (re.test(text)) return true; }
+      return false;
+    }
+
+    function findYesRow(lines) {
+      for (let i = 0; i < lines.length; i++) {
+        if (/❯\s*\d+\.\s*Yes/.test(lines[i])) return i;
+      }
+      return -1;
+    }
+
+    function flashYesRow(screenRow) {
+      const s = document.querySelector('.xterm-screen');
+      if (!s) return;
+      const h = s.offsetHeight / term.rows;
+      s.style.position = 'relative';
+
+      const bar = document.createElement('div');
+      bar.style.cssText = `position:absolute;left:0;width:100%;top:${screenRow*h}px;height:${h}px;background:#22c55e;opacity:0;pointer-events:none;z-index:5;`;
+      s.appendChild(bar);
+
+      // Flash twice: on→off→on→off
+      bar.style.opacity = '0.4';
+      setTimeout(() => { bar.style.opacity = '0'; }, 120);
+      setTimeout(() => { bar.style.opacity = '0.4'; }, 240);
+      setTimeout(() => { bar.style.opacity = '0'; }, 360);
+      setTimeout(() => { bar.remove(); }, 400);
+    }
+
+    function checkAndApprove() {
+      if (!watchActive) return;
+      if (Date.now() - lastApproveTs < 3000) return;
+      const lines = getScreenLines();
+      const screen = lines.join('\n');
+
+      // Don't approve if a command is still running
+      if (RUNNING_RE.test(screen)) return;
+
+      if (detectPrompt(screen) && DIALOG_COMPLETE_RE.test(screen)) {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => { debounceTimer = null; doApprove(); }, 200);
+      }
+    }
+
+    function doApprove() {
+      // Re-read screen at approve time (may have changed since debounce started)
+      const lines = getScreenLines();
+      const screen = lines.join('\n');
+      if (RUNNING_RE.test(screen)) return;
+      if (!detectPrompt(screen)) return;
+
+      const row = findYesRow(lines);
+      approveCount++;
+      lastApproveTs = Date.now();
+      approveCountEl.textContent = approveCount;
+
+      // Flash first, THEN approve after flash completes
+      if (row >= 0) flashYesRow(row);
+      btnAx.style.transition = 'none';
+      btnAx.style.boxShadow = '0 0 12px 4px #22c55e';
+      setTimeout(() => { btnAx.style.transition = 'box-shadow 0.5s'; btnAx.style.boxShadow = 'none'; }, 400);
+
+      setTimeout(() => {
+        wsSend({ type: 'approve' });
+      }, 400);
+    }
+
+    function updateAxButton() {
+      btnAx.textContent = watchActive ? 'AX \u25CF' : 'AX \u25A0';
+      btnAx.className = watchActive ? 'on' : 'off';
+    }
+
+    // ---- Resolve window → project info ----------------------------------
+
+    function parseWindowHost(title) {
+      const m = title.match(/\[SSH:\s*([^\]]+)\]/);
+      return m ? m[1].trim() : null;
+    }
+
+    function parseWindowProject(title) {
+      const parts = title.split(' - ');
+      if (parts.length >= 3) return parts[parts.length - 2].replace(/\s*\[SSH:.*\]/, '').trim();
+      return parts[0];
+    }
+
+    function resolveProjectInfo(win) {
+      const sshHost = parseWindowHost(win.title);
+      const projectName = win.project || parseWindowProject(win.title);
+
+      if (sshHost) {
+        const match = projectList.find(p =>
+          p.type === 'ssh' && p.host === sshHost && p.project === projectName
+        ) || projectList.find(p =>
+          p.type === 'ssh' && p.host === sshHost
+        );
+        if (match) return { sessionType: 'ssh', host: match.host, cwd: match.cwd };
+        return { sessionType: 'ssh', host: sshHost, cwd: '~' };
+      }
+
+      const match = projectList.find(p =>
+        p.type === 'local' && p.project === projectName
+      ) || projectList.find(p =>
+        p.type === 'local' && p.cwd.endsWith(projectName)
+      );
+      if (match) return { sessionType: 'local', host: null, cwd: match.cwd };
+      return { sessionType: 'local', host: null, cwd: projectName };
+    }
+
+    // ---- Tabs -----------------------------------------------------------
+
+    function renderTabs() {
+      tabsEl.innerHTML = '';
+      for (const w of windowList) {
+        const tab = document.createElement('div');
+        tab.className = 'tab' + (selectedWindow && selectedWindow.targetId === w.targetId ? ' active' : '');
+
+        const dot = document.createElement('span');
+        const host = parseWindowHost(w.title);
+        dot.className = 'dot ' + (host ? 'ssh' : 'local');
+        tab.appendChild(dot);
+
+        const label = document.createElement('span');
+        const proj = w.project || parseWindowProject(w.title);
+        label.textContent = host ? `[${host}] ${proj}` : proj;
+        tab.appendChild(label);
+
+        tab.onclick = () => selectWindow(w);
+        tabsEl.appendChild(tab);
+      }
+    }
+
+    function selectWindow(win) {
+      selectedWindow = win;
+      renderTabs();
+      term.reset();
+      approveCount = 0;
+      approveCountEl.textContent = '0';
+
+      const info = resolveProjectInfo(win);
+      if (!ws || ws.readyState !== 1) {
+        openWs(() => queryAndShow(info));
+      } else {
+        queryAndShow(info);
+      }
+    }
+
+    function queryAndShow(info) {
+      const handler = (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+        if (msg.type === 'query_result') {
+          ws.removeEventListener('message', handler);
+          if (msg.exists) {
+            showOverlay('Session active', 'Reconnect');
+          } else {
+            showOverlay('No active session', 'Start Claude');
+          }
+        }
+      };
+      ws.addEventListener('message', handler);
+      wsSend({ type: 'query', ...info });
+    }
+
+    // ---- WebSocket ------------------------------------------------------
+
+    function openWs(onOpen) {
+      if (ws) try { ws.close(); } catch {}
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/api/claude/ws`);
+      ws.onmessage = onWsMessage;
+      ws.onclose = () => showOverlay('Disconnected', 'Reconnect');
+      ws.onopen = () => { fitAddon.fit(); if (onOpen) onOpen(); };
+    }
+
+    function wsSend(msg) {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+    }
+
+    function onWsMessage(evt) {
+      // Binary frame = raw PTY data, write directly to xterm
+      if (typeof evt.data !== 'string') {
+        const handle = (ab) => {
+          term.write(new Uint8Array(ab));
+        };
+        if (evt.data instanceof Blob) {
+          evt.data.arrayBuffer().then(handle);
+        } else if (evt.data instanceof ArrayBuffer) {
+          handle(evt.data);
+        }
+        return;
+      }
+
+      // Text frame = JSON control message
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      switch (msg.type) {
+        case 'session':
+          hideOverlay();
+          if (msg.replay) term.write('\x1B[2J\x1B[H');
+          wsSend({ type: 'resize', cols: term.cols, rows: term.rows });
+          term.focus();
+          break;
+        case 'exit':
+          showOverlay(msg.reason === 'idle_timeout' ? 'Session timed out' : 'Session ended', 'Start Claude');
+          break;
+        case 'error':
+          showOverlay(msg.message, 'Retry');
+          break;
+        case 'no_session':
+          showOverlay('Session expired', 'Start Claude');
+          break;
+      }
+    }
+
+    function showOverlay(message, buttonLabel) {
+      overlayMsg.textContent = message;
+      btnConnect.textContent = buttonLabel || 'Connect';
+      btnConnect.style.display = 'inline-block';
+      overlay.classList.add('show');
+    }
+
+    function hideOverlay() {
+      overlay.classList.remove('show');
+    }
+
+    // ---- Connect button -------------------------------------------------
+
+    btnConnect.addEventListener('click', () => {
+      if (!selectedWindow) return;
+      const info = resolveProjectInfo(selectedWindow);
+      hideOverlay();
+      term.reset();
+
+      const doAction = () => {
+        fitAddon.fit();
+        // Always start fresh (kills old session if any)
+        wsSend({ type: 'start', ...info, cols: term.cols, rows: term.rows });
+      };
+
+      if (!ws || ws.readyState !== 1) {
+        openWs(doAction);
+      } else {
+        doAction();
+      }
+    });
+
+    // ---- Events ---------------------------------------------------------
+
+    term.onData((data) => { wsSend({ type: 'input', data }); });
+
+    new ResizeObserver(() => {
+      fitAddon.fit();
+      wsSend({ type: 'resize', cols: term.cols, rows: term.rows });
+    }).observe(document.getElementById('terminal-container'));
+
+    btnAx.addEventListener('click', () => {
+      watchActive = !watchActive;
+      updateAxButton();
+      if (watchActive) checkAndApprove();
+    });
+
+    // ---- Init -----------------------------------------------------------
+
+    const params = new URLSearchParams(location.search);
+    const initTargetId = params.get('targetId');
+    const cdpHost = params.get('host') || '127.0.0.1';
+    const cdpPort = params.get('port') || '9292';
+
+    async function init() {
+      updateAxButton();
+
+      const [winsResp, projResp] = await Promise.all([
+        fetch(`/api/windows?host=${cdpHost}&port=${cdpPort}`).then(r => r.json()).catch(() => ({ windows: [] })),
+        fetch('/api/claude/projects').then(r => r.json()).catch(() => []),
+      ]);
+
+      windowList = winsResp.windows || [];
+      projectList = projResp;
+
+      if (!windowList.length) {
+        showOverlay('No Cursor windows found (CDP)', '');
+        btnConnect.style.display = 'none';
+        return;
+      }
+
+      renderTabs();
+
+      const target = initTargetId
+        ? windowList.find(w => w.targetId === initTargetId) || windowList[0]
+        : windowList[0];
+
+      selectWindow(target);
+    }
+
+    init();
+
+    // Periodic auto-approve check (500ms) — reliable fallback since
+    // write callbacks may not fire in all browsers/headless environments
+    setInterval(checkAndApprove, 500);
+  </script>
+</body>
+</html>

@@ -59,13 +59,18 @@ async function findPageWithSelector(context, {
 function extractProjectName(title) {
   if (!title) return 'unknown';
 
-  // Old format: split by " - ", look for "Cursor" marker
+  // Format: "filename - projectName [SSH: host] - Profile - Cursor"
+  // or:     "filename - projectName [SSH: host] - Cursor"
   const parts = title.split(' - ').map(s => s.trim());
   const cursorIdx = parts.lastIndexOf('Cursor');
   if (cursorIdx >= 2) {
+    const raw = parts[cursorIdx - 1].replace(/\s*\[SSH:.*?\]/, '').trim();
+    if (raw && raw !== 'Cursor') return raw;
     return parts[cursorIdx - 2];
   }
   if (parts.length >= 3 && parts[parts.length - 1] === 'Cursor') {
+    const raw = parts[parts.length - 2].replace(/\s*\[SSH:.*?\]/, '').trim();
+    if (raw && raw !== 'Cursor') return raw;
     return parts[parts.length - 3] || parts[0];
   }
 

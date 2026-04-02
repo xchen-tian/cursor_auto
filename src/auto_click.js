@@ -85,9 +85,15 @@ let exitCleanup = null;
 // Page interaction helpers
 // ---------------------------------------------------------------------------
 
-async function clickOnce(page, { selector, containsText, requireReady, readyAttr }) {
-  return await page.evaluate(async ({ selector, containsText, requireReady, readyAttr }) => {
-    const nodes = Array.from(document.querySelectorAll(selector));
+async function clickOnce(page, { selector, containsText, requireReady, readyAttr, excludeSelector, excludeTexts }) {
+  return await page.evaluate(async ({ selector, containsText, requireReady, readyAttr, excludeSelector, excludeTexts }) => {
+    let nodes = Array.from(document.querySelectorAll(selector));
+    if (excludeSelector) {
+      nodes = nodes.filter(n => !n.matches(excludeSelector) && !n.closest(excludeSelector));
+    }
+    if (excludeTexts?.length) {
+      nodes = nodes.filter(n => !excludeTexts.some(t => (n.textContent || '').trim().toLowerCase().startsWith(t)));
+    }
     const node = containsText
       ? nodes.find(n => (n.textContent || '').includes(containsText))
       : nodes[0];
@@ -124,17 +130,26 @@ async function clickOnce(page, { selector, containsText, requireReady, readyAttr
 
     node.click();
     return { ok: true };
-  }, { selector, containsText, requireReady, readyAttr });
+  }, { selector, containsText, requireReady, readyAttr, excludeSelector, excludeTexts });
 }
 
-async function detectActivity(page, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel }) {
-  return await page.evaluate(({ selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel }) => {
+async function detectActivity(page, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel, buildButtonSel }) {
+  return await page.evaluate(({ selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel, buildButtonSel }) => {
     const approvalRootSel = agentApprovalSel?.root || '[data-tool-status="loading"]';
+    const buildSel = buildButtonSel || '.composer-create-plan-build-button';
+    const SKIP_TEXTS = ['continue', 'building'];
+    const isBuildEl = (n) => n.matches(buildSel) || n.closest(buildSel);
+    const isSkipText = (n) => SKIP_TEXTS.some(t => (n.textContent || '').trim().toLowerCase().startsWith(t));
     const btnNodes = Array.from(document.querySelectorAll(selector))
-      .filter(n => !n.closest(approvalRootSel));
+      .filter(n => !n.closest(approvalRootSel))
+      .filter(n => !isBuildEl(n))
+      .filter(n => !isSkipText(n));
     const hasRun = containsText
       ? btnNodes.some(n => (n.textContent || '').includes(containsText))
       : btnNodes.length > 0;
+    const hasContinue = Array.from(document.querySelectorAll(selector))
+      .some(n => (n.textContent || '').trim().toLowerCase().startsWith('continue'));
+    const hasBuild = !!document.querySelector(buildSel);
     const hasShimmer = document.querySelectorAll(shimmerSelector).length > 0;
     const bar = document.querySelector('.composer-bar[data-composer-status]');
     const composerStatus = bar?.dataset?.composerStatus ?? null;
@@ -198,12 +213,12 @@ async function detectActivity(page, { selector, containsText, shimmerSelector, a
     const hasAllowlistButton = hasApprovalAllowlistButton;
     const hasAgentApproval = approvalGroups.length > 0;
     return {
-      hasRun, hasShimmer, composerStatus, hasRunningCmd,
+      hasRun, hasBuild, hasContinue, hasShimmer, composerStatus, hasRunningCmd,
       isAgent, hasAgentLoading, hasToolLoading,
       hasSkipButton, hasAllowlistButton, hasAllowButton, hasAgentApproval,
       hasApprovalAllowButton, hasApprovalRunButton, hasApprovalSkipButton,
     };
-  }, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel });
+  }, { selector, containsText, shimmerSelector, agentLoadingSel, agentApprovalSel, buildButtonSel });
 }
 
 async function scrollChatToBottom(page) {
@@ -467,11 +482,17 @@ async function main() {
   }
   activePage = page;
 
+  const BUILD_BUTTON_SEL = '.composer-create-plan-build-button';
+
+  const SKIP_BUTTON_TEXTS = ['continue', 'building'];
+
   const clickOpts = {
     selector: argv.selector,
     containsText: argv.contains || undefined,
     requireReady: argv['require-ready'],
     readyAttr: argv['ready-attr'],
+    excludeSelector: BUILD_BUTTON_SEL,
+    excludeTexts: SKIP_BUTTON_TEXTS,
   };
 
   const activityOpts = {
@@ -480,6 +501,7 @@ async function main() {
     shimmerSelector: SHIMMER_SELECTORS,
     agentLoadingSel: AGENT_LOADING_SELECTORS,
     agentApprovalSel: AGENT_APPROVAL_SEL,
+    buildButtonSel: BUILD_BUTTON_SEL,
   };
 
   // -- once mode --
@@ -515,6 +537,8 @@ async function main() {
     try {
       const result = await claudeCode.scanAndApprove(argv.host, argv.port);
       if (result.approved.length > 0) {
+        try { await indicator.update(page, 'shimmer', 'CC: approving…'); } catch {}
+        await sleep(500);
         for (const a of result.approved) {
           console.log(`[APPROVE] Claude Code: "${a.headerText}" → ${a.btnText}`);
         }
