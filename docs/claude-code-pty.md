@@ -273,3 +273,29 @@ xterm.js v5 的 `write()` 是异步的——数据被缓冲，在下一个动画
 `RUNNING_RE = /esc to interrupt|Running\.\.\./i` 误匹配了工具调用显示标签 `Bash(pwd) └ Running...`。这个 "Running..." 是历史 UI 元素，不代表当前有命令在跑。权限提示和 "Running..." 可以同时出现在屏幕上。
 
 修法：只检查 `esc to interrupt`（小写，不加 `/i`）。这是 Claude 底部状态栏的运行指示器，只在命令真正执行时出现。`Esc to cancel`（大写 E）是权限对话框的，不影响。
+
+**Bug 21: xterm.js 滚动条突然跳到顶部**
+
+Claude 输出过程中，xterm.js 的滚动条有时突然跳到 buffer 最顶部。这是 Ink TUI 框架和 xterm.js 5.x 的已知交互问题（[Claude Code #34794](https://github.com/anthropics/claude-code/issues/34794)、[xterm.js #5390](https://github.com/xtermjs/xterm.js/pull/5390)）。
+
+根因：Ink 做差异渲染时，先用 cursor-up 把光标移到输出区域顶部，擦掉旧内容再写新内容。光标移到 buffer 很靠上的位置时，xterm.js 5.x 的视口跟着跳过去。另外 Ink 在某些场景切换 alternate screen buffer（`\x1B[?1049h`/`\x1B[?1049l`），退出 alternate buffer 时视口恢复到主缓冲区的旧位置，也会造成跳变。
+
+修法：升级 xterm.js 5.5.0 → 6.0.0（包含 alternate buffer 滚动修复 PR #5390），同时在每次 PTY 输出写入后调用 `term.scrollToBottom()` 作为双保险。
+
+**Bug 22: xterm.js getScreenLines 读的是历史而非当前视口**
+
+`buffer.active.getLine(i)` 的参数 `i` 是 buffer 中的绝对行号（包含 scrollback 历史），不是视口内的相对行号。当 buffer 有滚动历史时（`baseY > 0`），`getLine(0)` 返回历史最顶部的行，不是屏幕上第一行。
+
+权限提示总是在屏幕底部，但 `getScreenLines()` 读的是 `getLine(0)` 到 `getLine(rows-1)` — 全是旧历史。auto-approve 检测不到权限提示。
+
+debug 时发现 `buffer.length=57, baseY=18, rows=39`：代码读 0-38 行（历史），实际屏幕显示 18-56 行。
+
+修法：从 `buf.length - term.rows` 开始读最后 N 行，即当前视口。
+
+**Bug 23: term.write() 异步导致 checkAndApprove 读到旧 buffer**
+
+xterm.js v5/v6 的 `write()` 是异步的 — 数据被缓冲，在下一个动画帧才渲染到 buffer。在 `write()` 之后立即调 `checkAndApprove()` 读到的是上一帧的旧内容。
+
+尝试用 `write(data, callback)` 的回调，在 Playwright headless 里仍不可靠（callback 触发时 buffer 可能还没更新）。
+
+修法：不依赖 write 回调。改用 `setInterval(checkAndApprove, 500)` 周期轮询。每 500ms 读一次屏幕，跟渲染时序完全解耦。
