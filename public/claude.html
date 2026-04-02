@@ -35,6 +35,17 @@
 
     #terminal-container { flex: 1; overflow: hidden; position: relative; }
     #terminal-container .xterm { height: 100%; }
+    #scroll-indicator {
+      display: none; position: absolute; bottom: 0; left: 0; right: 0;
+      padding: 6px 16px; background: rgba(251, 140, 0, 0.92); color: #1a1a2e;
+      font-size: 13px; font-weight: 600; text-align: center; z-index: 20;
+      cursor: pointer; font-family: system-ui, -apple-system, sans-serif;
+      border-top: 2px solid #e65100;
+    }
+    #scroll-indicator kbd {
+      background: rgba(0,0,0,0.18); border-radius: 3px; padding: 1px 6px;
+      font-family: inherit; font-size: 12px;
+    }
     #app { display: flex; flex-direction: column; height: 100vh; }
 
     .overlay {
@@ -66,6 +77,7 @@
         </div>
         <div class="sub" id="overlay-sub"></div>
       </div>
+      <div id="scroll-indicator" onclick="exitScrollMode()"></div>
     </div>
   </div>
 
@@ -109,6 +121,9 @@
     let approveCount = 0;
     let lastApproveTs = 0;
     let debounceTimer = null;
+    let scrollMode = false;
+    let scrollBuffer = [];
+    let scrollBufferBytes = 0;
     let windowList = [];
     let projectList = [];
     let selectedWindow = null;
@@ -168,7 +183,7 @@
     }
 
     function checkAndApprove() {
-      if (!watchActive) return;
+      if (!watchActive || scrollMode) return;
       if (Date.now() - lastApproveTs < 3000) return;
       const lines = getScreenLines();
       const screen = lines.join('\n');
@@ -208,6 +223,47 @@
     function updateAxButton() {
       btnAx.textContent = watchActive ? 'AX \u25CF' : 'AX \u25A0';
       btnAx.className = watchActive ? 'on' : 'off';
+    }
+
+    // ---- Scroll Mode (tmux-like) ----------------------------------------
+
+    function enterScrollMode() {
+      if (scrollMode) return;
+      scrollMode = true;
+      scrollBuffer = [];
+      scrollBufferBytes = 0;
+      updateScrollIndicator();
+    }
+
+    function exitScrollMode() {
+      if (!scrollMode) return;
+      scrollMode = false;
+      if (scrollBuffer.length > 0) {
+        let total = 0;
+        for (const c of scrollBuffer) total += c.byteLength;
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of scrollBuffer) { merged.set(new Uint8Array(c), off); off += c.byteLength; }
+        scrollBuffer = [];
+        scrollBufferBytes = 0;
+        term.write(merged, () => term.scrollToBottom());
+      } else {
+        term.scrollToBottom();
+      }
+      updateScrollIndicator();
+    }
+
+    function updateScrollIndicator() {
+      const el = document.getElementById('scroll-indicator');
+      if (scrollMode) {
+        const kb = (scrollBufferBytes / 1024).toFixed(1);
+        el.innerHTML = '\u23F8 SCROLL MODE \u2014 '
+          + scrollBuffer.length + ' chunk(s), ' + kb + ' KB buffered \u2014 '
+          + '<kbd>Esc</kbd> / <kbd>q</kbd> to resume';
+        el.style.display = 'block';
+      } else {
+        el.style.display = 'none';
+      }
     }
 
     // ---- Resolve window → project info ----------------------------------
@@ -270,6 +326,7 @@
     }
 
     function selectWindow(win) {
+      if (scrollMode) { scrollMode = false; scrollBuffer = []; scrollBufferBytes = 0; updateScrollIndicator(); }
       selectedWindow = win;
       renderTabs();
       term.reset();
@@ -317,15 +374,20 @@
     }
 
     function onWsMessage(evt) {
-      // Binary frame = raw PTY data, write directly to xterm
       if (typeof evt.data !== 'string') {
-        const handle = (ab) => {
-          term.write(new Uint8Array(ab), () => term.scrollToBottom());
+        const handleBin = (ab) => {
+          if (scrollMode) {
+            scrollBuffer.push(ab);
+            scrollBufferBytes += ab.byteLength;
+            updateScrollIndicator();
+            return;
+          }
+          term.write(new Uint8Array(ab), () => { if (!scrollMode) term.scrollToBottom(); });
         };
         if (evt.data instanceof Blob) {
-          evt.data.arrayBuffer().then(handle);
+          evt.data.arrayBuffer().then(handleBin);
         } else if (evt.data instanceof ArrayBuffer) {
-          handle(evt.data);
+          handleBin(evt.data);
         }
         return;
       }
@@ -341,12 +403,15 @@
           term.focus();
           break;
         case 'exit':
+          if (scrollMode) exitScrollMode();
           showOverlay(msg.reason === 'idle_timeout' ? 'Session timed out' : 'Session ended', 'Start Claude');
           break;
         case 'error':
+          if (scrollMode) exitScrollMode();
           showOverlay(msg.message, 'Retry');
           break;
         case 'no_session':
+          if (scrollMode) exitScrollMode();
           showOverlay('Session expired', 'Start Claude');
           break;
       }
@@ -389,7 +454,43 @@
 
     // ---- Events ---------------------------------------------------------
 
-    term.onData((data) => { wsSend({ type: 'input', data }); });
+    term.onData((data) => {
+      if (scrollMode) return;
+      wsSend({ type: 'input', data });
+    });
+
+    term.attachCustomKeyEventHandler((e) => {
+      if (!scrollMode) {
+        if (e.type === 'keydown' && e.key === 'PageUp') {
+          enterScrollMode();
+          term.scrollPages(-1);
+          return false;
+        }
+        return true;
+      }
+      if (e.type === 'keydown') {
+        switch (e.key) {
+          case 'Escape': case 'q': exitScrollMode(); return false;
+          case 'ArrowUp': term.scrollLines(-1); return false;
+          case 'ArrowDown': term.scrollLines(1); return false;
+          case 'PageUp': term.scrollPages(-1); return false;
+          case 'PageDown': term.scrollPages(1); return false;
+          case 'Home': term.scrollToTop(); return false;
+          case 'End': term.scrollToBottom(); return false;
+        }
+      }
+      return false;
+    });
+
+    {
+      function onWheelUp(e) {
+        if (scrollMode || e.deltaY >= 0) return;
+        if (term.buffer.active.baseY > 0) enterScrollMode();
+      }
+      const vp = document.querySelector('.xterm-viewport');
+      if (vp) vp.addEventListener('wheel', onWheelUp, { passive: true });
+      term.element.addEventListener('wheel', onWheelUp, { passive: true, capture: true });
+    }
 
     new ResizeObserver(() => {
       fitAddon.fit();
