@@ -60,7 +60,10 @@
     <div id="terminal-container">
       <div class="overlay show" id="overlay">
         <div id="overlay-msg">Loading...</div>
-        <button id="btn-connect" style="display:none">Connect</button>
+        <div style="display:flex;gap:12px;">
+          <button id="btn-connect" style="display:none">Resume</button>
+          <button id="btn-new" style="display:none;border-color:#64748b;background:#334155;color:#e2e8f0;">New Session</button>
+        </div>
         <div class="sub" id="overlay-sub"></div>
       </div>
     </div>
@@ -99,6 +102,7 @@
     const overlayMsg = document.getElementById('overlay-msg');
     const overlaySub = document.getElementById('overlay-sub');
     const btnConnect = document.getElementById('btn-connect');
+    const btnNew = document.getElementById('btn-new');
 
     let ws = null;
     let watchActive = true;
@@ -348,10 +352,11 @@
       }
     }
 
-    function showOverlay(message, buttonLabel) {
+    function showOverlay(message, buttonLabel, showNew) {
       overlayMsg.textContent = message;
-      btnConnect.textContent = buttonLabel || 'Connect';
-      btnConnect.style.display = 'inline-block';
+      btnConnect.textContent = buttonLabel || 'Resume';
+      btnConnect.style.display = buttonLabel ? 'inline-block' : 'none';
+      btnNew.style.display = showNew !== false ? 'inline-block' : 'none';
       overlay.classList.add('show');
     }
 
@@ -361,7 +366,7 @@
 
     // ---- Connect button -------------------------------------------------
 
-    btnConnect.addEventListener('click', () => {
+    function startSession(newSession) {
       if (!selectedWindow) return;
       const info = resolveProjectInfo(selectedWindow);
       hideOverlay();
@@ -369,8 +374,7 @@
 
       const doAction = () => {
         fitAddon.fit();
-        // Always start fresh (kills old session if any)
-        wsSend({ type: 'start', ...info, cols: term.cols, rows: term.rows });
+        wsSend({ type: 'start', ...info, cols: term.cols, rows: term.rows, newSession: !!newSession });
       };
 
       if (!ws || ws.readyState !== 1) {
@@ -378,7 +382,10 @@
       } else {
         doAction();
       }
-    });
+    }
+
+    btnConnect.addEventListener('click', () => startSession(false));
+    btnNew.addEventListener('click', () => startSession(true));
 
     // ---- Events ---------------------------------------------------------
 
@@ -414,8 +421,9 @@
       projectList = projResp;
 
       if (!windowList.length) {
-        showOverlay('No Cursor windows found (CDP)', '');
+        showOverlay('No Cursor windows found (CDP)', '', false);
         btnConnect.style.display = 'none';
+        btnNew.style.display = 'none';
         return;
       }
 

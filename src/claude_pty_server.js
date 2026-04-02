@@ -102,7 +102,9 @@ class PtySession {
 
     const cols = opts.cols || 120;
     const rows = opts.rows || 40;
-    const claudeArgs = '--model opus --effort max --continue';
+    const claudeArgs = opts.newSession
+      ? '--model opus --effort max'
+      : '--model opus --effort max --continue';
 
     if (this.type === 'ssh' && this.host) {
       this._startSSH(cols, rows, claudeArgs);
