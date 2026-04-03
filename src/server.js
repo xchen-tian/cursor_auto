@@ -3,7 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const mime = require('mime-types');
 const { connectOverCDP, findPageByTargetId, findAllWorkbenchPages, extractProjectName, sleep } = require('./cdp');
 const { renderLive, buildResMap, extractPageStyles, makeAttrRewriter } = require('./live_render');
@@ -1574,35 +1574,72 @@ async function main() {
     wsStorageScanned = true;
   }
 
+  function stripSshSuffix(title) {
+    return title.replace(/\s*\[SSH:\s*[^\]]*\]\s*$/, '').trim();
+  }
+
+  function parseVscodeRemoteUri(uri) {
+    if (!uri.startsWith('vscode-remote://ssh-remote')) return null;
+    const afterScheme = uri.replace('vscode-remote://ssh-remote', '');
+    const slashIdx = afterScheme.indexOf('/');
+    if (slashIdx < 0) return null;
+    const rawHost = decodeURIComponent(afterScheme.slice(0, slashIdx).replace(/^%2B|^\+/, ''));
+    const remotePath = decodeURIComponent(afterScheme.slice(slashIdx));
+    return { host: rawHost, remotePath };
+  }
+
   async function resolveWorkspaceRoot(state, targetId) {
     if (!wsStorageScanned) scanWorkspaceStorage();
 
-    const project = await state.page.evaluate(() => {
+    const rawProject = await state.page.evaluate(() => {
       return document.querySelector('.sidebar .title')?.textContent?.trim() || '';
     });
+    if (!rawProject) return null;
+
+    const project = stripSshSuffix(rawProject);
     if (!project) return null;
 
     const cached = workspaceRootCache.get(project.toLowerCase());
     if (cached) return cached;
 
     const isWin = process.platform === 'win32';
-    const root = await state.page.evaluate(({ proj, isWin }) => {
-      const el = document.querySelector('[data-resource-uri]');
+    const uriResult = await state.page.evaluate(({ isWin }) => {
+      const el = document.querySelector('[data-uri]') || document.querySelector('[data-resource-uri]');
       if (!el) return null;
-      const uri = el.getAttribute('data-resource-uri') || '';
-      if (!uri.startsWith('file:///')) return null;
+      const uri = el.getAttribute('data-uri') || el.getAttribute('data-resource-uri') || '';
+      return uri || null;
+    }, { isWin });
+
+    if (!uriResult) return null;
+
+    if (uriResult.startsWith('file:///')) {
       try {
         const decoded = isWin
-          ? decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, '\\')
-          : decodeURIComponent(uri.replace('file://', ''));
-        const idx = decoded.toLowerCase().indexOf(proj.toLowerCase());
-        if (idx >= 0) return decoded.substring(0, idx + proj.length);
-        return null;
-      } catch { return null; }
-    }, { proj: project, isWin });
+          ? decodeURIComponent(uriResult.replace('file:///', '')).replace(/\//g, '\\')
+          : decodeURIComponent(uriResult.replace('file://', ''));
+        const idx = decoded.toLowerCase().indexOf(project.toLowerCase());
+        if (idx >= 0) {
+          const root = decoded.substring(0, idx + project.length);
+          workspaceRootCache.set(project.toLowerCase(), root);
+          return root;
+        }
+      } catch {}
+    }
 
-    if (root) workspaceRootCache.set(project.toLowerCase(), root);
-    return root;
+    if (uriResult.startsWith('vscode-remote://')) {
+      const parsed = parseVscodeRemoteUri(uriResult);
+      if (parsed) {
+        const idx = parsed.remotePath.toLowerCase().indexOf(project.toLowerCase());
+        if (idx >= 0) {
+          const remoteRoot = parsed.remotePath.substring(0, idx + project.length);
+          const root = { type: 'ssh', host: parsed.host, remotePath: remoteRoot };
+          workspaceRootCache.set(project.toLowerCase(), root);
+          return root;
+        }
+      }
+    }
+
+    return null;
   }
 
   async function openFullPathInEditor(state, wsRoot, fullPath) {
@@ -1667,7 +1704,7 @@ async function main() {
     try {
       const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
       const wsRoot = await resolveWorkspaceRoot(state, targetId);
-      if (!wsRoot) return res.json({ ok: false, error: 'workspace root not found' });
+      if (!wsRoot || typeof wsRoot !== 'string') return res.json({ ok: false, error: 'workspace root not found (remote workspace not supported for file-tree)' });
 
       const basePath = subPath ? path.resolve(wsRoot, subPath) : path.resolve(wsRoot);
       if (!isWithinRoot(wsRoot, basePath)) return res.status(403).json({ ok: false, error: 'forbidden' });
@@ -1748,7 +1785,7 @@ async function main() {
     try {
       const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
       const wsRoot = await resolveWorkspaceRoot(state, targetId);
-      if (!wsRoot) return res.json({ ok: false, error: 'workspace root not found' });
+      if (!wsRoot || typeof wsRoot !== 'string') return res.json({ ok: false, error: 'workspace root not found (remote workspace not supported for file-open)' });
 
       const fullPath = path.resolve(wsRoot, filePath);
       const result = await openFullPathInEditor(state, wsRoot, fullPath);
@@ -1780,7 +1817,7 @@ async function main() {
     try {
       const state = await getLiveCDP(host, port, { targetId: targetId || undefined, timeout: 10000 });
       const wsRoot = await resolveWorkspaceRoot(state, targetId);
-      if (!wsRoot) return res.json({ ok: false, error: 'workspace root not found' });
+      if (!wsRoot || typeof wsRoot !== 'string') return res.json({ ok: false, error: 'workspace root not found (remote workspace not supported for sidebar-activate)' });
 
       if (kind === 'file' || doubleClick) {
         const result = await openFullPathInEditor(state, wsRoot, fullPath);
@@ -1911,7 +1948,20 @@ async function main() {
     }
   });
 
-  // GET /api/editor-content — read file text from filesystem (Monaco DOM is virtual, can't extract)
+  // GET /api/editor-content — read file text (local fs or SSH for remote workspaces)
+  function readRemoteFile(sshHost, remotePath, maxBytes) {
+    const limit = maxBytes || 2 * 1024 * 1024;
+    try {
+      const buf = execSync(
+        `ssh -o ConnectTimeout=5 -o BatchMode=yes ${sshHost} "head -c ${limit} ${remotePath.replace(/"/g, '\\"')}"`,
+        { timeout: 10000, maxBuffer: limit + 4096, encoding: 'buffer' },
+      );
+      return { ok: true, data: buf };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e).substring(0, 200) };
+    }
+  }
+
   app.get('/api/editor-content', async (req, res) => {
     const host = String(req.query.host || '127.0.0.1');
     const port = Number(req.query.port || 9292);
@@ -1925,71 +1975,73 @@ async function main() {
       const isWin = process.platform === 'win32';
       const info = await state.page.evaluate(({ gi, isWin }) => {
         const editorPart = document.querySelector('.part.editor');
-        if (!editorPart) return { activeTab: '', filePath: '' };
+        if (!editorPart) return { activeTab: '', rawUri: '' };
         const groups = editorPart.querySelectorAll('.editor-group-container');
         const group = groups[gi] || groups[0];
-        if (!group) return { activeTab: '', filePath: '' };
+        if (!group) return { activeTab: '', rawUri: '' };
 
         const activeTabEl = group.querySelector('.tabs-container [role="tab"][aria-selected="true"]');
         const activeTab = (activeTabEl?.getAttribute('aria-label') || '').trim()
           .replace(/, Editor Group \d+$/, '').replace(/, preview$/, '');
 
-        const resourceEl = group.querySelector('[data-resource-uri]');
-        let filePath = '';
-        if (resourceEl) {
-          const uri = resourceEl.getAttribute('data-resource-uri') || '';
-          if (uri.startsWith('file:///')) {
-            if (isWin) {
-              filePath = decodeURIComponent(uri.replace('file:///', '')).replace(/\//g, '\\');
-            } else {
-              filePath = decodeURIComponent(uri.replace('file://', ''));
-            }
-          }
-        }
-        return { activeTab, filePath, groupCount: groups.length };
+        const uriEl = group.querySelector('[data-uri]') || group.querySelector('[data-resource-uri]');
+        const rawUri = uriEl?.getAttribute('data-uri') || uriEl?.getAttribute('data-resource-uri') || '';
+
+        return { activeTab, rawUri, groupCount: groups.length };
       }, { gi: groupIdx, isWin });
 
       let text = '';
       let totalLines = 0;
       let language = '';
-      let filePath = info.filePath || '';
+      let filePath = '';
+      let sshInfo = null;
 
-      // Try reading from filesystem — search workspace for the file
-      if (!filePath && wsRoot && info.activeTab) {
-        const fileName = info.activeTab;
-        const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-        const quickPaths = [
-          path.join(wsRoot, fileName),
-          path.join(wsRoot, 'src', fileName),
-          path.join(wsRoot, 'public', fileName),
-          path.join(wsRoot, 'lib', fileName),
-          path.join(wsRoot, '.cursor', 'plans', fileName),
-          path.join(homeDir, '.cursor', 'plans', fileName),
-          path.join(homeDir, '.cursor', 'projects', fileName),
-        ];
-        for (const p of quickPaths) {
-          if (fs.existsSync(p)) { filePath = p; break; }
-        }
-        // Fallback: recursive search (max 3 levels)
-        if (!filePath) {
-          const findFile = (dir, name, depth) => {
-            if (depth <= 0) return null;
-            try {
-              for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (e.name === name && !e.isDirectory()) return path.join(dir, name);
-                if (e.isDirectory() && !['node_modules', '.git'].includes(e.name)) {
-                  const r = findFile(path.join(dir, e.name), name, depth - 1);
-                  if (r) return r;
+      if (info.rawUri.startsWith('file:///')) {
+        filePath = isWin
+          ? decodeURIComponent(info.rawUri.replace('file:///', '')).replace(/\//g, '\\')
+          : decodeURIComponent(info.rawUri.replace('file://', ''));
+      } else if (info.rawUri.startsWith('vscode-remote://')) {
+        sshInfo = parseVscodeRemoteUri(info.rawUri);
+      }
+
+      // Local file fallback: search workspace for the file by name
+      if (!filePath && !sshInfo && info.activeTab) {
+        const localRoot = (wsRoot && typeof wsRoot === 'string') ? wsRoot : null;
+        if (localRoot) {
+          const fileName = info.activeTab;
+          const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+          const quickPaths = [
+            path.join(localRoot, fileName),
+            path.join(localRoot, 'src', fileName),
+            path.join(localRoot, 'public', fileName),
+            path.join(localRoot, 'lib', fileName),
+            path.join(localRoot, '.cursor', 'plans', fileName),
+            path.join(homeDir, '.cursor', 'plans', fileName),
+            path.join(homeDir, '.cursor', 'projects', fileName),
+          ];
+          for (const p of quickPaths) {
+            if (fs.existsSync(p)) { filePath = p; break; }
+          }
+          if (!filePath) {
+            const findFile = (dir, name, depth) => {
+              if (depth <= 0) return null;
+              try {
+                for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                  if (e.name === name && !e.isDirectory()) return path.join(dir, name);
+                  if (e.isDirectory() && !['node_modules', '.git'].includes(e.name)) {
+                    const r = findFile(path.join(dir, e.name), name, depth - 1);
+                    if (r) return r;
+                  }
                 }
-              }
-            } catch {}
-            return null;
-          };
-          filePath = findFile(wsRoot, fileName, 5) || '';
+              } catch {}
+              return null;
+            };
+            filePath = findFile(localRoot, fileName, 5) || '';
+          }
         }
       }
 
-      const ext = path.extname(info.activeTab || filePath || '').toLowerCase();
+      const ext = path.extname(info.activeTab || filePath || (sshInfo?.remotePath || '')).toLowerCase();
       const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico']);
       let isImage = IMAGE_EXTS.has(ext);
       let imageUrl = '';
@@ -2014,14 +2066,32 @@ async function main() {
             text = '(Cannot read file: ' + e.message + ')';
           }
         }
+      } else if (sshInfo) {
+        const r = readRemoteFile(sshInfo.host, sshInfo.remotePath);
+        if (r.ok) {
+          if (isImage) {
+            const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+              '.svg': 'image/svg+xml', '.webp': 'image/webp', '.bmp': 'image/bmp', '.ico': 'image/x-icon' };
+            imageUrl = 'data:' + (mimeMap[ext] || 'application/octet-stream') + ';base64,' + r.data.toString('base64');
+          } else {
+            text = r.data.toString('utf8');
+            totalLines = text.split('\n').length;
+          }
+        } else {
+          text = '(SSH read failed: ' + r.error + ')';
+        }
+        filePath = sshInfo.remotePath;
       }
+
       const langMap = { '.js': 'javascript', '.ts': 'typescript', '.py': 'python', '.html': 'html',
         '.css': 'css', '.json': 'json', '.md': 'markdown', '.sh': 'shell', '.ps1': 'powershell',
         '.yaml': 'yaml', '.yml': 'yaml', '.xml': 'xml', '.sql': 'sql', '.rs': 'rust', '.go': 'go',
-        '.java': 'java', '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.rb': 'ruby', '.dart': 'dart' };
+        '.java': 'java', '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.rb': 'ruby', '.dart': 'dart',
+        '.cu': 'cpp', '.cuh': 'cpp' };
       language = langMap[ext] || ext.replace('.', '') || 'text';
 
-      console.log('[editor-content] tab=%s lines=%d lang=%s image=%s', info.activeTab, totalLines, language, isImage);
+      console.log('[editor-content] tab=%s lines=%d lang=%s image=%s ssh=%s',
+        info.activeTab, totalLines, language, isImage, sshInfo ? sshInfo.host : 'no');
       const result = {
         ok: true, text, totalLines, language, isImage,
         activeTab: info.activeTab, groupCount: info.groupCount || 1,
