@@ -127,6 +127,35 @@
     let windowList = [];
     let projectList = [];
     let selectedWindow = null;
+    let sessionExists = false;
+
+    const tabStates = new Map();
+    function getTabState(id) {
+      if (!tabStates.has(id)) tabStates.set(id, { watchActive: true, approveCount: 0, lastApproveTs: 0 });
+      return tabStates.get(id);
+    }
+    function saveTabState() {
+      if (!selectedWindow) return;
+      const s = getTabState(selectedWindow.targetId);
+      s.watchActive = watchActive;
+      s.approveCount = approveCount;
+      s.lastApproveTs = lastApproveTs;
+      const buf = term.buffer.active;
+      const lines = [];
+      for (let i = 0; i < buf.length; i++) {
+        const l = buf.getLine(i);
+        lines.push(l ? l.translateToString(true) : '');
+      }
+      while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+      s.screenLines = lines;
+    }
+    function loadTabState(id) {
+      const s = getTabState(id);
+      watchActive = s.watchActive;
+      approveCount = s.approveCount;
+      lastApproveTs = s.lastApproveTs;
+      updateAxButton();
+    }
 
     // ---- Client-side prompt detection -----------------------------------
 
@@ -327,11 +356,17 @@
 
     function selectWindow(win) {
       if (scrollMode) { scrollMode = false; scrollBuffer = []; scrollBufferBytes = 0; updateScrollIndicator(); }
+      saveTabState();
+      wsSend({ type: 'detach' });
       selectedWindow = win;
+      loadTabState(win.targetId);
       renderTabs();
       term.reset();
-      approveCount = 0;
-      approveCountEl.textContent = '0';
+
+      const saved = getTabState(win.targetId);
+      if (saved.screenLines && saved.screenLines.length) {
+        term.write(saved.screenLines.join('\r\n'));
+      }
 
       const info = resolveProjectInfo(win);
       if (!ws || ws.readyState !== 1) {
@@ -347,8 +382,14 @@
         try { msg = JSON.parse(evt.data); } catch { return; }
         if (msg.type === 'query_result') {
           ws.removeEventListener('message', handler);
+          sessionExists = msg.exists;
           if (msg.exists) {
-            showOverlay('Session active', 'Reconnect');
+            const saved = getTabState(selectedWindow.targetId);
+            if (saved.screenLines && saved.screenLines.length > 0) {
+              wsSend({ type: 'attach', ...info, skipReplay: true });
+            } else {
+              showOverlay('Session active', 'Reconnect');
+            }
           } else {
             showOverlay('No active session', 'Start Claude');
           }
@@ -399,7 +440,9 @@
         case 'session':
           hideOverlay();
           if (msg.replay) term.write('\x1B[2J\x1B[H');
-          wsSend({ type: 'resize', cols: term.cols, rows: term.rows });
+          // Briefly change cols to force SIGWINCH → Ink full redraw
+          wsSend({ type: 'resize', cols: term.cols + 1, rows: term.rows });
+          setTimeout(() => wsSend({ type: 'resize', cols: term.cols, rows: term.rows }), 80);
           term.focus();
           break;
         case 'exit':
@@ -449,7 +492,28 @@
       }
     }
 
-    btnConnect.addEventListener('click', () => startSession(false));
+    function attachSession() {
+      if (!selectedWindow) return;
+      const info = resolveProjectInfo(selectedWindow);
+      hideOverlay();
+      term.reset();
+
+      const doAction = () => {
+        fitAddon.fit();
+        wsSend({ type: 'attach', ...info });
+      };
+
+      if (!ws || ws.readyState !== 1) {
+        openWs(doAction);
+      } else {
+        doAction();
+      }
+    }
+
+    btnConnect.addEventListener('click', () => {
+      if (sessionExists) attachSession();
+      else startSession(false);
+    });
     btnNew.addEventListener('click', () => startSession(true));
 
     // ---- Events ---------------------------------------------------------

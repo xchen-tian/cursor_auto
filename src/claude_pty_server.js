@@ -252,8 +252,10 @@ class PtySession {
     sessions.delete(this.key);
   }
 
-  attach(ws) {
+  attach(ws, skipReplay) {
     this.clients.add(ws);
+
+    const doReplay = !skipReplay && this.outputBuf.length > 0;
 
     this._sendJson(ws, {
       type: 'session',
@@ -261,30 +263,20 @@ class PtySession {
       host: this.host,
       cwd: this.cwd,
       alive: !this.exited,
-      replay: this.outputBuf.length > 0,
+      replay: doReplay,
     });
 
-    // Replay buffered output as binary
-    if (this.outputBuf.length > 0 && ws.readyState === 1) {
+    if (doReplay && ws.readyState === 1) {
       try { ws.send(this.outputBuf); } catch {}
     }
 
     if (this.exited) {
       this._sendJson(ws, { type: 'exit', code: this.exitCode });
     }
+  }
 
-    ws.on('message', (raw) => {
-      const str = Buffer.isBuffer(raw) ? raw.toString('utf-8') : String(raw);
-      let msg;
-      try { msg = JSON.parse(str); } catch { return; }
-      if (msg && msg.type) {
-        this._handleMessage(msg);
-      }
-    });
-
-    ws.on('close', () => {
-      this.clients.delete(ws);
-    });
+  detach(ws) {
+    this.clients.delete(ws);
   }
 
   _handleMessage(msg) {
@@ -343,10 +335,26 @@ class PtySession {
 // ---------------------------------------------------------------------------
 
 function handleConnection(ws) {
+  let currentSession = null;
+
+  function detachCurrent() {
+    if (currentSession) {
+      currentSession.detach(ws);
+      currentSession = null;
+    }
+  }
+
+  ws.on('close', () => { detachCurrent(); });
+
   ws.on('message', (raw) => {
     const str = Buffer.isBuffer(raw) ? raw.toString('utf-8') : String(raw);
     let msg;
     try { msg = JSON.parse(str); } catch { return; }
+
+    if (msg.type === 'detach') {
+      detachCurrent();
+      return;
+    }
 
     if (msg.type === 'query') {
       const key = sessionKey(msg);
@@ -360,12 +368,14 @@ function handleConnection(ws) {
     }
 
     if (msg.type === 'start') {
+      detachCurrent();
       const key = sessionKey(msg);
       let session = sessions.get(key);
       if (session && !session.exited) session.kill();
       try {
         session = new PtySession(msg);
         sessions.set(key, session);
+        currentSession = session;
         session.attach(ws);
       } catch (err) {
         ws.send(JSON.stringify({ type: 'error', message: `Failed to spawn: ${err.message}` }));
@@ -374,14 +384,20 @@ function handleConnection(ws) {
     }
 
     if (msg.type === 'attach') {
+      detachCurrent();
       const key = sessionKey(msg);
       const session = sessions.get(key);
       if (session && !session.exited) {
-        session.attach(ws);
+        currentSession = session;
+        session.attach(ws, msg.skipReplay);
       } else {
         ws.send(JSON.stringify({ type: 'no_session', key }));
       }
       return;
+    }
+
+    if (currentSession && !currentSession.exited) {
+      currentSession._handleMessage(msg);
     }
   });
 }
