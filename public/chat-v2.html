@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Chat V2 — Cursor Auto</title>
+  <meta name="theme-color" content="#222" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100vh; height: 100dvh; overflow: hidden;
+      background: #181818; color: #e4e4e4;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size: 14px; }
+
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+    /* --- Top Bar --- */
+    #topBar { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 12px; height: 40px;
+      background: #222; border-bottom: 1px solid #333; font-size: 13px; overflow-x: auto; white-space: nowrap; }
+    #topBar button, #topBar select { padding: 4px 10px; border-radius: 6px; border: 1px solid #555; background: #333; color: #ddd; cursor: pointer; font-size: 12px; }
+    #topBar button:hover { background: #444; }
+
+    /* --- Window Bar --- */
+    #winBar { flex-shrink: 0; display: flex; gap: 0; background: #1a1a1a; border-bottom: 1px solid #333; overflow-x: auto; min-height: 0; }
+    #winBar:empty { display: none; }
+    .win-btn { flex-shrink: 0; padding: 5px 14px; border: none; border-bottom: 2px solid transparent;
+      background: transparent; color: #777; cursor: pointer; font-size: 12px; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+    .win-btn:hover { color: #ccc; background: #252525; }
+    .win-btn.active { color: #ddd; border-bottom-color: #5b9bf0; background: #222; }
+
+    /* --- Tab Bar --- */
+    #tabBar { flex-shrink: 0; display: flex; gap: 0; background: #222; border-bottom: 1px solid #333;
+      overflow-x: auto; scrollbar-width: thin; min-height: 36px; align-items: stretch; }
+    .tab-btn { flex-shrink: 0; padding: 8px 16px; border: none; border-bottom: 2px solid transparent;
+      background: transparent; color: #888; cursor: pointer; font-size: 13px; white-space: nowrap;
+      max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+    .tab-btn:hover { color: #ccc; background: #2a2a2a; }
+    .tab-btn.active { color: #fff; border-bottom-color: #3b7dd8; }
+    .tab-btn .match-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; background: #43a047; vertical-align: middle; }
+    .tab-btn .no-match { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; background: #666; vertical-align: middle; }
+
+    /* --- Main Content --- */
+    #mainArea { flex: 1; display: flex; min-height: 0; }
+
+    /* --- Session Sidebar --- */
+    #sidebar { width: 260px; flex-shrink: 0; background: #1e1e1e; border-right: 1px solid #333;
+      display: flex; flex-direction: column; overflow: hidden; }
+    #sidebar.collapsed { width: 0; border-right: none; }
+    #sidebarHeader { padding: 8px 10px; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 6px; }
+    #sidebarHeader strong { font-size: 12px; color: #aaa; }
+    #sidebarSearch { width: 100%; padding: 5px 8px; border: 1px solid #444; border-radius: 6px;
+      background: #252525; color: #ddd; font-size: 12px; outline: none; margin-top: 4px; }
+    #sidebarSearch:focus { border-color: #3b7dd8; }
+    #sessionList { flex: 1; overflow-y: auto; padding: 4px 0; }
+    .session-item { padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent; font-size: 12px; }
+    .session-item:hover { background: #252525; }
+    .session-item.active { background: #2a2a2a; border-left-color: #3b7dd8; }
+    .session-title { color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3; }
+    .session-meta { color: #666; font-size: 11px; margin-top: 2px; }
+
+    /* --- Message Area --- */
+    #msgPanel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    #msgArea { flex: 1; overflow-y: auto; padding: 16px 20px 60px; }
+    #msgArea.empty-state { display: flex; align-items: center; justify-content: center; color: #555; font-size: 15px; }
+
+    /* --- Message Cards (Cursor-matched colors) --- */
+    .msg-group { margin-bottom: 20px; max-width: 860px; margin-left: auto; margin-right: auto; }
+    .msg-user { background: rgba(74, 74, 74, 0.135); border: 0.8px solid rgba(228, 228, 228, 0.11);
+      border-radius: 8px; padding: 10px 14px;
+      color: rgba(228, 228, 228, 0.85); white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6; }
+    .msg-user-label { font-size: 11px; color: rgba(228, 228, 228, 0.55); font-weight: 600; margin-bottom: 4px; }
+    .msg-assistant { background: transparent; padding: 4px 0;
+      color: rgba(228, 228, 228, 0.92); line-height: 1.65; font-size: 14px; word-break: break-word; }
+    .msg-assistant-label { font-size: 11px; color: rgba(228, 228, 228, 0.4); font-weight: 600; margin-bottom: 6px; }
+
+    /* Markdown inside assistant cards */
+    .msg-assistant h1, .msg-assistant h2, .msg-assistant h3 { color: rgba(228,228,228,0.92); margin: 16px 0 8px; border-bottom: 1px solid rgba(228,228,228,0.07); padding-bottom: 4px; }
+    .msg-assistant h1 { font-size: 20px; }
+    .msg-assistant h2 { font-size: 17px; }
+    .msg-assistant h3 { font-size: 15px; }
+    .msg-assistant p { margin: 8px 0; }
+    .msg-assistant ul, .msg-assistant ol { padding-left: 20px; margin: 8px 0; }
+    .msg-assistant li { margin: 3px 0; }
+    .msg-assistant a { color: #88c0d0; }
+    .msg-assistant strong { color: rgba(228,228,228,1); }
+    .msg-assistant code { background: rgba(10,10,10,0.4); padding: 2px 5px; border-radius: 4px; font-size: 13px;
+      font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; }
+    .msg-assistant blockquote { border-left: 3px solid rgba(228,228,228,0.15); margin: 8px 0; padding: 4px 12px; color: rgba(228,228,228,0.55); }
+    .msg-assistant hr { border: none; border-top: 1px solid rgba(228,228,228,0.07); margin: 16px 0; }
+
+    /* --- Code Block Card (Cursor-style) --- */
+    .code-card { border: 1px solid rgba(228,228,228,0.07); border-radius: 8px; margin: 10px 0; overflow: hidden; background: #141414; }
+    .code-card-header { display: flex; align-items: center; justify-content: space-between; padding: 5px 12px;
+      background: rgba(228,228,228,0.04); border-bottom: 1px solid rgba(228,228,228,0.07); font-size: 12px; }
+    .code-card-lang { color: rgba(228,228,228,0.5); font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    .code-card-lang .lang-icon { font-weight: 700; font-size: 11px; padding: 1px 4px; border-radius: 3px; background: rgba(228,228,228,0.08); }
+    .code-card-file { color: #88c0d0; font-size: 12px; }
+    .code-card-changes { font-size: 11px; margin-left: 6px; }
+    .code-card-changes .add-count { color: #3fa266; }
+    .code-card-changes .del-count { color: #b80049; margin-left: 2px; }
+    .code-card-copy { padding: 2px 8px; border: 1px solid rgba(228,228,228,0.1); border-radius: 4px; background: transparent;
+      color: rgba(228,228,228,0.4); cursor: pointer; font-size: 11px; }
+    .code-card-copy:hover { background: rgba(228,228,228,0.06); color: rgba(228,228,228,0.7); }
+    .code-card pre { margin: 0; padding: 10px 14px; overflow-x: auto; font-size: 13px; line-height: 1.5;
+      font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; background: #181818; }
+    .code-card pre code { background: none; padding: 0; border-radius: 0; }
+    .code-card.collapsed pre { max-height: 300px; overflow: hidden; }
+    .code-card .expand-btn { display: block; width: 100%; padding: 5px; border: none; border-top: 1px solid rgba(228,228,228,0.07);
+      background: rgba(228,228,228,0.04); color: #88c0d0; cursor: pointer; font-size: 12px; text-align: center; }
+    .code-card .expand-btn:hover { background: rgba(228,228,228,0.06); }
+
+    /* Diff line highlighting (Cursor exact colors) */
+    .diff-line-add { background: rgba(63, 162, 102, 0.2); display: block; margin: 0 -14px; padding: 0 14px; }
+    .diff-line-del { background: rgba(184, 0, 73, 0.2); display: block; margin: 0 -14px; padding: 0 14px; text-decoration: line-through; text-decoration-color: rgba(184, 0, 73, 0.4); }
+    .diff-line-ctx { display: block; margin: 0 -14px; padding: 0 14px; color: rgba(228,228,228,0.5); }
+
+    /* --- Table Card --- */
+    .table-card { margin: 10px 0; overflow-x: auto; border: 1px solid rgba(228,228,228,0.07); border-radius: 8px; }
+    .table-card table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .table-card th { background: rgba(228,228,228,0.04); padding: 8px 12px; text-align: left; border-bottom: 1px solid rgba(228,228,228,0.07); color: rgba(228,228,228,0.8); font-weight: 600; }
+    .table-card td { padding: 7px 12px; border-bottom: 1px solid rgba(228,228,228,0.04); color: rgba(228,228,228,0.75); }
+    .table-card tr:nth-child(even) { background: rgba(228,228,228,0.02); }
+
+    /* --- Thinking Block --- */
+    .thinking-block { margin: 8px 0; border: 1px solid #2a2a2a; border-radius: 8px; background: #141414; }
+    .thinking-toggle { display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer;
+      color: #666; font-size: 12px; border: none; background: none; width: 100%; text-align: left; }
+    .thinking-toggle:hover { color: #999; }
+    .thinking-toggle .arrow { transition: transform 0.15s; }
+    .thinking-toggle.open .arrow { transform: rotate(90deg); }
+    .thinking-content { display: none; padding: 8px 14px; color: #777; font-size: 13px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word; border-top: 1px solid #222; }
+    .thinking-content.open { display: block; }
+
+    /* --- Status Bar --- */
+    #statusBar { flex-shrink: 0; height: 24px; display: flex; align-items: center; gap: 12px; padding: 0 12px;
+      background: #222; border-top: 1px solid #333; font-size: 11px; color: #777; }
+
+    /* --- Mode / Model Bar --- */
+    #modeModelBar { display: flex; align-items: center; justify-content: space-between; max-width: 900px;
+      margin: 0 auto; padding: 6px 12px 0; }
+    #modeButtons { display: flex; gap: 0; border: 1px solid rgba(228,228,228,0.1); border-radius: 8px; overflow: hidden; }
+    .mode-btn { padding: 4px 14px; border: none; background: transparent; color: rgba(228,228,228,0.45);
+      font-size: 12px; cursor: pointer; font-weight: 500; }
+    .mode-btn:hover { background: rgba(228,228,228,0.06); color: rgba(228,228,228,0.7); }
+    .mode-btn.active { background: rgba(228,228,228,0.1); color: rgba(228,228,228,0.9); }
+    #modelBtn { padding: 3px 10px; border: 1px solid rgba(228,228,228,0.1); border-radius: 16px;
+      background: transparent; color: rgba(228,228,228,0.5); font-size: 12px; cursor: pointer; }
+    #modelBtn:hover { background: rgba(228,228,228,0.06); color: rgba(228,228,228,0.7); }
+
+    /* --- Prompt Area --- */
+    #promptArea { flex-shrink: 0; border-top: 1px solid #333; background: #1e1e1e; }
+    #promptInner { display: flex; gap: 8px; max-width: 900px; margin: 0 auto; padding: 8px 12px; align-items: flex-end; }
+    #promptInput { flex: 1; resize: vertical; background: #252525; color: #e4e4e4; border: 1px solid #444;
+      border-radius: 10px; padding: 8px 10px; font: 14px/1.4 system-ui, -apple-system, sans-serif;
+      min-height: 38px; max-height: 200px; outline: none; }
+    #promptInput:focus { border-color: #3b7dd8; }
+    #btnSend { width: 38px; height: 38px; border-radius: 10px; border: 1px solid #3b7dd8;
+      background: #2a3a55; color: #ddd; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; }
+    #btnSend:hover { background: #3b5588; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="topBar">
+    <a id="dashLink" href="/" style="text-decoration:none;color:#999;font-size:13px">&lt; Dashboard</a>
+    <strong>Chat V2</strong>
+    <button id="btnToggleSidebar" title="Toggle sidebar">&#9776;</button>
+    <label style="color:#999">Refresh
+      <select id="refreshSec">
+        <option value="2" selected>2s</option>
+        <option value="3">3s</option>
+        <option value="5">5s</option>
+        <option value="0">Manual</option>
+      </select>
+    </label>
+    <button id="btnRefresh">Refresh Now</button>
+    <span id="topStatus" style="color:#666;font-size:12px"></span>
+  </div>
+
+  <div id="winBar"></div>
+  <div id="tabBar"></div>
+
+  <div id="mainArea">
+    <div id="sidebar">
+      <div id="sidebarHeader">
+        <strong>Sessions</strong>
+      </div>
+      <input id="sidebarSearch" type="text" placeholder="Search sessions..." />
+      <div id="sessionList"></div>
+    </div>
+    <div id="msgPanel">
+      <div id="msgArea" class="empty-state">Select a session or tab to view</div>
+      <div id="promptArea">
+        <div id="modeModelBar">
+          <div id="modeButtons">
+            <button class="mode-btn" data-mode="agent">Agent</button>
+            <button class="mode-btn" data-mode="ask">Ask</button>
+            <button class="mode-btn" data-mode="plan">Plan</button>
+          </div>
+          <button id="modelBtn" title="Click to switch model">auto</button>
+        </div>
+        <div id="promptInner">
+          <textarea id="promptInput" rows="2" placeholder="Enter to send, Shift+Enter for newline"></textarea>
+          <button id="btnSend" title="Send">&#x2191;</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="statusBar"><span id="statusText">Loading...</span></div>
+</div>
+
+<script>
+(function() {
+  const P = new URLSearchParams(location.search);
+  const HOST = P.get('host') || '127.0.0.1';
+  const PORT = Number(P.get('port') || 9292);
+  const TOKEN = P.get('token') || '';
+  const INIT_TARGET = P.get('targetId') || '';
+
+  const winBarEl = document.getElementById('winBar');
+  const tabBarEl = document.getElementById('tabBar');
+  const sidebarEl = document.getElementById('sidebar');
+  const sessionListEl = document.getElementById('sessionList');
+  const sidebarSearchEl = document.getElementById('sidebarSearch');
+  const msgAreaEl = document.getElementById('msgArea');
+  const statusText = document.getElementById('statusText');
+  const topStatus = document.getElementById('topStatus');
+  const promptInput = document.getElementById('promptInput');
+
+  let selectedTargetId = INIT_TARGET;
+  let knownWindows = [];
+  let tabs = [];
+  let currentTab = -1;
+  let projectKey = '';
+  let sessions = [];
+  let activeSessionId = '';
+  let lastMtime = 0;
+  let refreshTimer = null;
+  let inflight = false;
+  let cachedStyles = '';
+  let cachedStylesHash = '';
+  // All content rendered from JSONL via Markdown cards. CDP used only for tab/mode/send.
+
+  function authHeaders() { return TOKEN ? { 'x-token': TOKEN } : {}; }
+  function baseQs(extra = {}) {
+    const qs = new URLSearchParams({ host: HOST, port: String(PORT) });
+    if (TOKEN) qs.set('token', TOKEN);
+    if (selectedTargetId) qs.set('targetId', selectedTargetId);
+    for (const [k, v] of Object.entries(extra)) if (v != null && v !== '') qs.set(k, String(v));
+    return qs;
+  }
+  async function fetchJ(url) { return (await fetch(url, { headers: authHeaders() })).json(); }
+  async function postJ(url, body) {
+    return (await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ host: HOST, port: PORT, ...body }),
+    })).json();
+  }
+
+  // --- Dashboard link ---
+  document.getElementById('dashLink').onclick = e => { e.preventDefault(); location.href = '/?' + baseQs(); };
+
+  // --- Window Bar ---
+  function windowDisplayName(w) {
+    const parts = (w.title || '').split(' - ').map(s => s.trim());
+    if (parts.length >= 3 && parts[parts.length - 1] === 'Cursor') {
+      return parts[parts.length - 2];
+    }
+    return w.project || w.title || 'unknown';
+  }
+  function renderWindows() {
+    winBarEl.innerHTML = '';
+    if (knownWindows.length <= 1) return;
+    for (const w of knownWindows) {
+      const b = document.createElement('button');
+      b.className = 'win-btn' + (w.targetId === selectedTargetId ? ' active' : '');
+      b.textContent = windowDisplayName(w);
+      b.title = w.title;
+      b.onclick = () => switchWindow(w.targetId);
+      winBarEl.appendChild(b);
+    }
+  }
+  function switchWindow(tid) {
+    if (tid === selectedTargetId) return;
+    selectedTargetId = tid;
+    currentTab = -1; tabs = []; projectKey = ''; sessions = []; activeSessionId = '';
+    renderWindows();
+    loadTabs().then(loadSessions);
+  }
+  async function refreshWindows() {
+    try {
+      const r = await fetchJ('/api/windows?' + baseQs());
+      if (!r.ok) return;
+      knownWindows = r.windows || [];
+      if (!selectedTargetId && knownWindows.length) {
+        const local = knownWindows.find(w => !w.title?.includes('SSH:'));
+        selectedTargetId = (local || knownWindows[0]).targetId;
+      }
+      if (selectedTargetId && !knownWindows.find(w => w.targetId === selectedTargetId)) {
+        selectedTargetId = knownWindows.length ? knownWindows[0].targetId : '';
+      }
+      renderWindows();
+    } catch {}
+  }
+
+  // --- Tab Bar ---
+  function renderTabs() {
+    tabBarEl.innerHTML = '';
+    tabs.forEach((t, i) => {
+      const b = document.createElement('button');
+      b.className = 'tab-btn' + (i === currentTab ? ' active' : '');
+      const dot = document.createElement('span');
+      dot.className = t.sessionId ? 'match-dot' : 'no-match';
+      b.appendChild(dot);
+      const sp = document.createElement('span');
+      sp.textContent = t.title || '(untitled)';
+      sp.style.cssText = 'overflow:hidden;text-overflow:ellipsis';
+      b.appendChild(sp);
+      b.title = t.title + (t.sessionId ? '\nSession: ' + t.sessionId.substring(0, 8) : '\n(no JSONL match)');
+      b.onclick = () => switchTab(i);
+      tabBarEl.appendChild(b);
+    });
+    const addBtn = document.createElement('button');
+    addBtn.className = 'tab-btn';
+    addBtn.style.cssText = 'font-size:18px;padding:4px 14px;color:#666';
+    addBtn.textContent = '+';
+    addBtn.title = 'New Chat';
+    addBtn.onclick = newChat;
+    tabBarEl.appendChild(addBtn);
+  }
+  async function loadTabs() {
+    try {
+      const r = await fetchJ('/api/chat-tabs?' + baseQs());
+      if (!r.ok) return;
+      tabs = r.tabs || [];
+      if (r.projectKey) projectKey = r.projectKey;
+      const sel = tabs.findIndex(t => t.selected);
+      currentTab = sel >= 0 ? sel : 0;
+      renderTabs();
+      const tab = tabs[currentTab];
+      if (tab?.sessionId) {
+        activeSessionId = tab.sessionId;
+        loadMessages(activeSessionId);
+      } else if (projectKey) {
+        await loadSessions();
+        if (sessions.length) {
+          activeSessionId = sessions[0].id;
+          loadMessages(activeSessionId);
+          renderSessions();
+        }
+      }
+    } catch (e) {
+      statusText.textContent = 'Tab load error: ' + e.message;
+    }
+  }
+  async function switchTab(i) {
+    currentTab = i;
+    renderTabs();
+    const tab = tabs[i];
+    try {
+      await fetchJ('/api/chat-content?' + baseQs({ tab: String(i) }));
+    } catch {}
+    if (tab?.sessionId) {
+      activeSessionId = tab.sessionId;
+      lastMtime = 0;
+      loadMessages(activeSessionId);
+      renderSessions(sidebarSearchEl.value);
+    } else {
+      statusText.textContent = 'Tab "' + (tab?.title || '') + '" has no JSONL match';
+    }
+  }
+
+  async function newChat() {
+    statusText.textContent = 'Creating new chat...';
+    try {
+      const r = await postJ('/api/composer/new-chat', { targetId: selectedTargetId });
+      if (r.ok) {
+        await new Promise(res => setTimeout(res, 1000));
+        await loadTabs();
+        await loadSessions();
+        statusText.textContent = 'New chat created';
+      } else {
+        statusText.textContent = 'Error: ' + (r.reason || r.error || 'unknown');
+      }
+    } catch (e) {
+      statusText.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  // --- Session Sidebar ---
+  async function loadSessions() {
+    if (!projectKey) return;
+    try {
+      const r = await fetchJ('/api/transcript/sessions?' + baseQs({ projectKey, enrichTitles: '1' }));
+      if (!r.ok) return;
+      sessions = r.sessions || [];
+      renderSessions();
+    } catch {}
+  }
+  function renderSessions(filter) {
+    sessionListEl.innerHTML = '';
+    const q = (filter || '').toLowerCase();
+    for (const s of sessions) {
+      const displayTitle = s.cursorTitle || s.title;
+      if (q && !displayTitle.toLowerCase().includes(q) && !s.title.toLowerCase().includes(q) && !s.id.includes(q)) continue;
+      const d = document.createElement('div');
+      d.className = 'session-item' + (s.id === activeSessionId ? ' active' : '');
+      const titleEl = document.createElement('div');
+      titleEl.className = 'session-title';
+      titleEl.textContent = displayTitle;
+      const metaEl = document.createElement('div');
+      metaEl.className = 'session-meta';
+      metaEl.textContent = timeAgo(s.updatedAt) + (s.hasSubagents ? ' · has subagents' : '');
+      if (s.cursorTitle && s.cursorTitle !== s.title) {
+        metaEl.textContent += ' · ' + s.title.substring(0, 30);
+      }
+      d.appendChild(titleEl);
+      d.appendChild(metaEl);
+      d.title = displayTitle + '\n' + s.title + '\n' + s.id;
+      d.onclick = () => selectSession(s.id);
+      sessionListEl.appendChild(d);
+    }
+  }
+  function highlightSession(sid) {
+    const items = sessionListEl.querySelectorAll('.session-item');
+    items.forEach((el, i) => {
+      el.classList.toggle('active', i < sessions.length && sessions[i].id === sid);
+    });
+  }
+  async function selectSession(sid) {
+    activeSessionId = sid;
+    lastMtime = 0;
+    renderSessions(sidebarSearchEl.value);
+
+    const matchingTab = tabs.findIndex(t => t.sessionId === sid);
+    if (matchingTab >= 0) {
+      currentTab = matchingTab;
+      renderTabs();
+      try { await fetchJ('/api/chat-content?' + baseQs({ tab: String(matchingTab) })); } catch {}
+    }
+
+    loadMessages(sid);
+  }
+  sidebarSearchEl.addEventListener('input', () => renderSessions(sidebarSearchEl.value));
+
+  document.getElementById('btnToggleSidebar').onclick = () => sidebarEl.classList.toggle('collapsed');
+
+  // --- Message Rendering ---
+  function configureMarked() {
+    const renderer = new marked.Renderer();
+
+    renderer.code = function(codeObj) {
+      const text = typeof codeObj === 'object' ? codeObj.text : codeObj;
+      const lang = typeof codeObj === 'object' ? (codeObj.lang || '') : (arguments[1] || '');
+
+      const fileMatch = lang.match(/^(\d+):(\d+):(.+)$/);
+      const actualLang = fileMatch ? guessLangFromPath(fileMatch[3]) : lang;
+      const filePath = fileMatch ? fileMatch[3] : '';
+      const lineRange = fileMatch ? 'L' + fileMatch[1] + '-' + fileMatch[2] : '';
+
+      const codeLines = text.split('\n');
+      const isDiff = codeLines.some(l => /^[+-]/.test(l)) && codeLines.filter(l => /^[+-]/.test(l)).length >= 2;
+
+      let bodyHtml;
+      if (isDiff) {
+        bodyHtml = renderDiffLines(codeLines, actualLang);
+      } else {
+        let highlighted;
+        if (actualLang && hljs.getLanguage(actualLang)) {
+          try { highlighted = hljs.highlight(text, { language: actualLang }).value; } catch { highlighted = escapeHtml(text); }
+        } else {
+          try { highlighted = hljs.highlightAuto(text).value; } catch { highlighted = escapeHtml(text); }
+        }
+        bodyHtml = highlighted;
+      }
+
+      let addCount = 0, delCount = 0;
+      if (isDiff) {
+        for (const l of codeLines) { if (l.startsWith('+')) addCount++; else if (l.startsWith('-')) delCount++; }
+      }
+
+      const langIcon = actualLang ? '<span class="lang-icon">' + escapeHtml(actualLang.toUpperCase().substring(0,4)) + '</span>' : '';
+      const fileLabel = filePath ? '<span class="code-card-file">' + escapeHtml(filePath) + '</span>' : '';
+      const rangeLabel = lineRange ? ' <span style="color:rgba(228,228,228,0.3)">' + lineRange + '</span>' : '';
+      const changesLabel = (addCount || delCount)
+        ? '<span class="code-card-changes"><span class="add-count">+' + addCount + '</span> <span class="del-count">-' + delCount + '</span></span>'
+        : '';
+
+      const lines = codeLines.length;
+      const collapsed = lines > 25 ? ' collapsed' : '';
+      const expandBtn = lines > 25
+        ? '<button class="expand-btn" onclick="this.parentElement.classList.toggle(\'collapsed\');this.textContent=this.parentElement.classList.contains(\'collapsed\')?\'Show all ' + lines + ' lines\':\'Collapse\'">Show all ' + lines + ' lines</button>'
+        : '';
+
+      return '<div class="code-card' + collapsed + '">'
+        + '<div class="code-card-header">'
+        + '<span class="code-card-lang">' + langIcon + fileLabel + rangeLabel + changesLabel + '</span>'
+        + '<button class="code-card-copy" onclick="copyCode(this)">Copy</button>'
+        + '</div>'
+        + '<pre><code>' + bodyHtml + '</code></pre>'
+        + expandBtn
+        + '</div>';
+    };
+
+    renderer.table = function(tableObj) {
+      const header = typeof tableObj === 'object' ? tableObj.header : arguments[0];
+      const body = typeof tableObj === 'object' ? tableObj.body : arguments[1];
+      return '<div class="table-card"><table><thead>' + header + '</thead><tbody>' + body + '</tbody></table></div>';
+    };
+
+    marked.setOptions({
+      renderer,
+      gfm: true,
+      breaks: false,
+      pedantic: false,
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function guessLangFromPath(fp) {
+    const ext = (fp || '').split('.').pop()?.toLowerCase() || '';
+    const map = { js:'javascript', ts:'typescript', py:'python', rb:'ruby', rs:'rust', go:'go',
+      sh:'bash', ps1:'powershell', md:'markdown', json:'json', html:'html', css:'css',
+      yaml:'yaml', yml:'yaml', xml:'xml', sql:'sql', java:'java', c:'c', cpp:'cpp', h:'c' };
+    return map[ext] || ext || '';
+  }
+
+  function renderDiffLines(lines, lang) {
+    return lines.map(line => {
+      const raw = escapeHtml(line);
+      if (line.startsWith('+')) return '<span class="diff-line-add">' + tryHighlightLine(line.substring(1), lang) + '</span>';
+      if (line.startsWith('-')) return '<span class="diff-line-del">' + tryHighlightLine(line.substring(1), lang) + '</span>';
+      return '<span class="diff-line-ctx">' + tryHighlightLine(line, lang) + '</span>';
+    }).join('\n');
+  }
+
+  function tryHighlightLine(text, lang) {
+    if (!lang || !hljs.getLanguage(lang)) return escapeHtml(text);
+    try { return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value; } catch { return escapeHtml(text); }
+  }
+
+  window.copyCode = function(btn) {
+    const pre = btn.closest('.code-card')?.querySelector('pre code');
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent).then(() => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 1500);
+    });
+  };
+
+  function renderMessages(messages) {
+    msgAreaEl.classList.remove('empty-state');
+    msgAreaEl.innerHTML = '';
+    if (!messages.length) {
+      msgAreaEl.innerHTML = '<div style="text-align:center;color:#555;padding:40px">No messages in this session</div>';
+      return;
+    }
+
+    for (const msg of messages) {
+      const group = document.createElement('div');
+      group.className = 'msg-group';
+
+      if (msg.role === 'user') {
+        const label = document.createElement('div');
+        label.className = 'msg-user-label';
+        label.textContent = 'You';
+        group.appendChild(label);
+        const card = document.createElement('div');
+        card.className = 'msg-user';
+        card.textContent = msg.cleanText || msg.text;
+        group.appendChild(card);
+      } else {
+        const label = document.createElement('div');
+        label.className = 'msg-assistant-label';
+        label.textContent = 'Assistant';
+        group.appendChild(label);
+
+        if (msg.thinkingText && msg.thinkingCount > 0) {
+          const tb = document.createElement('div');
+          tb.className = 'thinking-block';
+          const toggle = document.createElement('button');
+          toggle.className = 'thinking-toggle';
+          toggle.innerHTML = '<span class="arrow">&#9654;</span> Show reasoning (' + msg.thinkingCount + ' blocks)';
+          const content = document.createElement('div');
+          content.className = 'thinking-content';
+          content.textContent = msg.thinkingText;
+          toggle.onclick = () => { toggle.classList.toggle('open'); content.classList.toggle('open'); };
+          tb.appendChild(toggle);
+          tb.appendChild(content);
+          group.appendChild(tb);
+        }
+
+        const card = document.createElement('div');
+        card.className = 'msg-assistant';
+        const textToRender = msg.visibleText != null ? msg.visibleText : msg.text;
+        try {
+          card.innerHTML = marked.parse(textToRender || '');
+        } catch {
+          card.textContent = textToRender || '';
+        }
+        group.appendChild(card);
+      }
+      msgAreaEl.appendChild(group);
+    }
+
+    msgAreaEl.scrollTop = msgAreaEl.scrollHeight;
+  }
+
+  // --- Load messages from JSONL ---
+  async function loadMessages(sid) {
+    if (!projectKey || !sid) return;
+    inflight = true;
+    const oldStyles = document.getElementById('cv-live-styles');
+    if (oldStyles) oldStyles.remove();
+    try {
+      const r = await fetchJ('/api/transcript/messages?' + baseQs({ projectKey, sessionId: sid, parseThinking: '1' }));
+      if (!r.ok) { statusText.textContent = 'Error: ' + (r.error || ''); inflight = false; return; }
+      lastMtime = r.mtime || 0;
+      renderMessages(r.messages || []);
+      statusText.textContent = 'HISTORY · ' + projectKey + ' · ' + sid.substring(0, 8) + '… · ' +
+        (r.messages?.length || 0) + ' msgs · ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      statusText.textContent = 'Load error: ' + e.message;
+    }
+    inflight = false;
+  }
+
+  // --- Auto refresh (aggressive JSONL mtime check + tab sync) ---
+  let tabSyncCounter = 0;
+  async function checkRefresh() {
+    if (inflight) return;
+    if (projectKey && activeSessionId) {
+      try {
+        const r = await fetchJ('/api/transcript/mtime?' + baseQs({ projectKey, sessionId: activeSessionId }));
+        if (r.ok && r.mtime > lastMtime) {
+          await loadMessages(activeSessionId);
+          statusText.textContent += ' (updated)';
+        }
+      } catch {}
+    }
+    if (projectKey) {
+      try {
+        const r = await fetchJ('/api/transcript/sessions?' + baseQs({ projectKey, enrichTitles: '0' }));
+        if (r.ok && r.sessions?.length) {
+          const newest = r.sessions[0];
+          if (newest.id !== activeSessionId && newest.updatedAt > lastMtime) {
+            sessions = r.sessions;
+            renderSessions();
+          }
+        }
+      } catch {}
+    }
+    tabSyncCounter++;
+    if (tabSyncCounter % 5 === 0) {
+      try {
+        const r = await fetchJ('/api/chat-tabs?' + baseQs());
+        if (r.ok && r.tabs) {
+          tabs = r.tabs;
+          if (r.projectKey) projectKey = r.projectKey;
+          const sel = tabs.findIndex(t => t.selected);
+          if (sel >= 0 && sel !== currentTab) {
+            currentTab = sel;
+            renderTabs();
+            const tab = tabs[sel];
+            if (tab?.sessionId && tab.sessionId !== activeSessionId) {
+              activeSessionId = tab.sessionId;
+              lastMtime = 0;
+              loadMessages(activeSessionId);
+              renderSessions(sidebarSearchEl.value);
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+  function scheduleRefresh() {
+    if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+    const sec = Number(document.getElementById('refreshSec').value);
+    if (sec > 0) refreshTimer = setTimeout(() => { checkRefresh().finally(scheduleRefresh); }, sec * 1000);
+  }
+  document.getElementById('refreshSec').onchange = scheduleRefresh;
+  document.getElementById('btnRefresh').onclick = () => {
+    if (activeSessionId) loadMessages(activeSessionId).finally(scheduleRefresh);
+    loadTabs();
+    loadSessions();
+  };
+
+  // --- Send prompt ---
+  async function doSend() {
+    const text = promptInput.value.trim();
+    if (!text) return;
+    try {
+      const r = await postJ('/api/composer/insert?' + baseQs(), {
+        text, append: false, send: true, targetId: selectedTargetId,
+      });
+      if (r.ok) { promptInput.value = ''; }
+      else { topStatus.textContent = 'Send error: ' + (r.error || ''); }
+    } catch (e) { topStatus.textContent = 'Send error: ' + e.message; }
+  }
+  document.getElementById('btnSend').onclick = doSend;
+  promptInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
+
+  // --- Mode / Model ---
+  const modeBtns = document.querySelectorAll('.mode-btn');
+  const modelBtn = document.getElementById('modelBtn');
+
+  async function refreshModeModel() {
+    try {
+      const r = await fetchJ('/api/composer/mode?' + baseQs());
+      if (!r.ok) return;
+      modeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === r.mode));
+      if (r.model) modelBtn.textContent = r.model;
+    } catch {}
+  }
+
+  modeBtns.forEach(btn => {
+    btn.onclick = async () => {
+      const mode = btn.dataset.mode;
+      modeBtns.forEach(b => b.classList.toggle('active', b === btn));
+      try {
+        await postJ('/api/composer/mode', { targetId: selectedTargetId, mode });
+      } catch {}
+    };
+  });
+
+  modelBtn.onclick = async () => {
+    try {
+      const r = await fetchJ('/api/composer/models?' + baseQs());
+      if (!r.ok || !r.models.length) return;
+      const menu = document.createElement('div');
+      menu.style.cssText = 'position:fixed;bottom:90px;right:20px;background:#1e1e1e;border:1px solid rgba(228,228,228,0.15);border-radius:8px;padding:4px 0;z-index:999;max-height:300px;overflow-y:auto;min-width:180px;box-shadow:0 4px 12px rgba(0,0,0,0.4)';
+      for (const m of r.models) {
+        const item = document.createElement('div');
+        item.style.cssText = 'padding:6px 14px;cursor:pointer;font-size:12px;color:' + (m.selected ? 'rgba(228,228,228,0.9)' : 'rgba(228,228,228,0.55)') + ';background:' + (m.selected ? 'rgba(228,228,228,0.08)' : 'transparent');
+        item.textContent = m.label;
+        item.onmouseenter = () => item.style.background = 'rgba(228,228,228,0.08)';
+        item.onmouseleave = () => item.style.background = m.selected ? 'rgba(228,228,228,0.08)' : 'transparent';
+        item.onclick = async () => {
+          document.body.removeChild(menu);
+          modelBtn.textContent = m.label;
+          try { await postJ('/api/composer/model', { targetId: selectedTargetId, model: m.label }); } catch {}
+          refreshModeModel();
+        };
+        menu.appendChild(item);
+      }
+      document.body.appendChild(menu);
+      const dismiss = (e) => { if (!menu.contains(e.target) && e.target !== modelBtn) { try { document.body.removeChild(menu); } catch {} document.removeEventListener('click', dismiss); } };
+      setTimeout(() => document.addEventListener('click', dismiss), 100);
+    } catch {}
+  };
+
+  // --- Utils ---
+  function timeAgo(ms) {
+    if (!ms) return '';
+    const d = Date.now() - ms;
+    if (d < 60000) return 'just now';
+    if (d < 3600000) return Math.floor(d / 60000) + 'm ago';
+    if (d < 86400000) return Math.floor(d / 3600000) + 'h ago';
+    return Math.floor(d / 86400000) + 'd ago';
+  }
+
+  // --- Init ---
+  configureMarked();
+  refreshWindows()
+    .then(() => loadTabs())
+    .then(() => { loadSessions(); refreshModeModel(); })
+    .then(scheduleRefresh);
+  setInterval(refreshWindows, 10000);
+})();
+</script>
+</body>
+</html>
