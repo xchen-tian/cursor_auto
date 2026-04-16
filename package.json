@@ -12,6 +12,8 @@
     "click:watch:scan": "node src/click_supervisor.js --verbose --scan-tabs",
     "capture": "node src/capture_static.js --selector .monaco-workbench",
     "capture:noimg": "node src/capture_static.js --selector .monaco-workbench --embed-images=false",
+    "capture:claude": "node src/capture_claude.js",
+    "capture:claude:noimg": "node src/capture_claude.js --embed-images=false",
     "doctor": "node src/doctor.js",
     "site:build": "node src/build_site.js",
     "build": "node src/build.js --verbose",

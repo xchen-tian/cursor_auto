@@ -500,13 +500,16 @@ async function main() {
     if (liveState.context) {
       if (liveState.key !== wantedKey) {
         resetLiveCDP();
-      } else {
+      } else if (liveState.browser && liveState.browser.isConnected()) {
         try {
-          liveState.context.pages();
+          const pages = liveState.context.pages();
+          if (pages.length > 0) await pages[0].title();
           return;
         } catch {
           resetLiveCDP();
         }
+      } else {
+        resetLiveCDP();
       }
     }
     liveState.connecting = (async () => {

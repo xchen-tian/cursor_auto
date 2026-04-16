@@ -13,7 +13,7 @@ const { execFileSync } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const pty = require('node-pty');
+const pty = require('./node_pty');
 const { Client: SSHClient } = require('ssh2');
 const SSHConfig = require('ssh-config');
 
@@ -34,6 +34,20 @@ function resolveLocalClaudePath() {
   } catch {
     return 'claude';
   }
+}
+
+function resolveLocalCwd(cwd) {
+  const resolved = path.resolve(String(cwd || process.cwd()));
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error(`Local cwd does not exist: ${resolved}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`Local cwd is not a directory: ${resolved}`);
+  }
+  return resolved;
 }
 
 function sessionKey(opts) {
@@ -116,10 +130,12 @@ class PtySession {
 
   _startLocal(cols, rows, claudeArgs) {
     const claudeCmd = resolveLocalClaudePath();
+    const localCwd = resolveLocalCwd(this.cwd);
+    this.cwd = localCwd;
     this._pty = pty.spawn(claudeCmd, claudeArgs.split(' '), {
       name: 'xterm-256color',
       cols, rows,
-      cwd: this.cwd,
+      cwd: localCwd,
       env: { ...process.env, FORCE_COLOR: '1' },
     });
 

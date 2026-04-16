@@ -6,11 +6,12 @@ Automation utilities for **Cursor / VS Code (Electron)** by attaching to the Wor
 
 1. **Auto-click** — monitor and click Workbench DOM buttons (e.g. Composer Run/Fetch), with watch mode, scan-tabs mode, and AX status indicator
 2. **Claude Code auto-approval** — automatically approve Claude Code extension permission dialogs (integrated into auto-click watch loop)
-3. **Static snapshot capture** — grab the Workbench DOM as offline-viewable HTML, MHTML, and screenshot
-3. **Live View** — real-time iframe preview of the Cursor UI with click forwarding (click in the preview, Cursor executes)
-4. **Composer Input** — programmatically insert text into the Cursor AI chat input and send messages via CDP
-5. **Window Resize** — resize/maximize/restore the Cursor window via Win32 API (physical pixels)
-6. **Web Dashboard** — phone/tablet-friendly control panel to trigger all actions from any LAN device
+3. **Static snapshot capture** — grab the Workbench DOM (or Claude Code webviews) as offline-viewable HTML, MHTML, and screenshot
+4. **Live View** — real-time iframe preview of the Cursor UI with click forwarding (click in the preview, Cursor executes)
+5. **Composer Input** — programmatically insert text into the Cursor AI chat input and send messages via CDP
+6. **Claude Code Web terminal** — run Claude Code CLI locally or over SSH from your browser (`/claude`), with per-tab independent xterm.js sessions and client-side prompt auto-approval
+7. **Window Resize** — resize/maximize/restore the Cursor window via Win32 API (physical pixels)
+8. **Web Dashboard** — phone/tablet-friendly control panel to trigger all actions from any LAN device
 
 ---
 
@@ -149,6 +150,35 @@ Outputs per capture folder:
 
 ---
 
+## Claude Code snapshot capture (CLI)
+
+Capture content from Claude Code extension webviews (separate from the main Workbench capture):
+
+```bash
+npm run capture:claude
+```
+
+Without image embedding (faster/smaller):
+
+```bash
+npm run capture:claude:noimg
+```
+
+Outputs to `dist/capture/claude/<timestamp>/` (multiple targets get subdirectories):
+
+| File | Description |
+|------|-------------|
+| `index.html` | Static snapshot of the Claude Code inner document — CSS inlined from extension files, scripts removed |
+| `screenshot.png` | Best-effort (not available on Electron iframe targets — `screenshot_error.txt` explains) |
+| `snapshot.mhtml` | Best-effort (same Electron limitation as screenshot) |
+| `report.json` | Target identification, resource inlining report, errors |
+
+**How it works:** Claude Code runs in isolated `vscode-webview://` CDP iframe targets that are invisible to Playwright. This script discovers them via `/json/list`, identifies Claude targets by DOM fingerprint (CSS module class markers + text content), then captures each one using raw WebSocket CDP connections.
+
+**Note:** Screenshot and MHTML are restricted to top-level CDP targets by Electron. The HTML output is the primary artifact and includes full CSS from the extension's bundled stylesheet via filesystem fallback.
+
+---
+
 ## Window resize (CLI)
 
 Resize the Cursor window using Win32 API (works even when maximized):
@@ -227,6 +257,32 @@ Requests must include `x-token: change-me` header or `?token=change-me` query pa
 
 ---
 
+## Claude Code Web terminal
+
+Open `http://localhost:5123/claude` to run Claude Code CLI through a browser terminal (xterm.js). Each tab has an **independent** xterm + WebSocket + reconnect timer — terminals in background tabs keep receiving output, so switching tabs never drops logs.
+
+### Features
+
+- **Per-tab sessions** — each tab is its own `TabConnection` (own terminal buffer, ws, debouncer). Switching tabs only toggles a CSS overlay.
+- **Local + SSH** — projects are auto-discovered from Cursor's `workspaceStorage`. Local paths launch via `node-pty`; `vscode-remote://ssh-remote/...` paths launch `claude` remotely via `ssh2`, reading `~/.ssh/config`.
+- **AX auto-approval** — client-side regex matchers (`PROMPT_PATTERNS`) detect "Do you want to...", "wants to run/edit/...", "Yes/No" prompts; after a 200 ms debounce they send `1\r` to approve. A 3 s cooldown prevents repeat clicks.
+- **tmux-style scroll** — `PageUp` enters a locked scroll mode; `ArrowUp/Down`, `PageUp/Down`, `Home`, `End` navigate; `Esc` or `q` exits.
+- **Approve counter badge** — each tab shows a green badge with the number of prompts auto-approved in that session.
+
+### HTTP endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/claude` | Web terminal UI |
+| GET | `/api/claude/projects` | List local + SSH projects from Cursor's `workspaceStorage` |
+| WS | `/api/claude/ws` | PTY WebSocket (handled by `claude_pty_server.js`) |
+
+### macOS note
+
+`node-pty` ships prebuilt binaries whose `spawn-helper` can lose its executable bit when npm extracts the tarball. The project wraps `node-pty` in `src/node_pty.js` which `chmod +x` the helper on first load. Always `require('./node_pty')` instead of `require('node-pty')` if you add new PTY code.
+
+---
+
 ## REST API
 
 ### Click
@@ -287,6 +343,14 @@ Requests must include `x-token: change-me` header or `?token=change-me` query pa
 
 or `{ "maximize": true }`
 
+### Claude Code terminal
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/claude` | Claude Code Web terminal page |
+| GET | `/api/claude/projects` | Scan Cursor `workspaceStorage` → `[{type:'local'|'ssh', host, cwd, project}]` |
+| WS | `/api/claude/ws` | PTY WebSocket (local via node-pty, SSH via ssh2) |
+
 ### Status & Resources
 
 | Method | Path | Description |
@@ -306,12 +370,17 @@ or `{ "maximize": true }`
 | `npm run click:watch:scan` | Continuous watch (multi-tab scan) |
 | `npm run capture` | Static snapshot |
 | `npm run capture:noimg` | Static snapshot without embedded images |
+| `npm run capture:claude` | Claude Code extension snapshot |
+| `npm run capture:claude:noimg` | Claude Code snapshot without embedded images |
 | `npm run resize` | Resize window (see `--help`) |
 | `npm run resize:info` | Show current window info |
+| `npm run claude` | Launch Claude Code CLI in the current terminal via node-pty |
+| `npm run claude:verbose` | Same as above, with verbose logging |
 | `npm run build` | Select model + Build |
 | `npm run build:models` | List available models |
 | `npm run doctor` | Health check |
 | `npm run site:build` | Generate static index site |
+| `npm run help` | Show `auto_click.js` CLI options |
 
 ---
 
@@ -341,6 +410,168 @@ npx serve dist/site
 | `BIND` | `0.0.0.0` | Bind address |
 | `CURSOR_AUTO_TOKEN` | (empty) | Enable token auth |
 | `CURSOR_APP_ROOT` | (auto-detected) | Manual Cursor `resources/app` path |
+
+---
+
+## Proxy configuration (Claude Code / Codex CLI)
+
+If you need Claude Code or Codex CLI to go through a proxy (e.g. corporate network, SSH SOCKS tunnel), use the provided `start_claude_proxy.sh` script or configure manually.
+
+### Quick start with `start_claude_proxy.sh`
+
+The script starts a **pproxy** (SOCKS5 → HTTP) bridge and automatically syncs proxy settings into both `~/.claude/settings.json` and Cursor `settings.json`:
+
+```bash
+# Default: SOCKS5 :9988 → HTTP :9991
+./start_claude_proxy.sh
+
+# Custom SOCKS port
+CLAUDE_SOCKS_PORT=1080 ./start_claude_proxy.sh
+
+# Also start SSH SOCKS tunnel to a remote host
+CLAUDE_SSH_HOST="user@server" ./start_claude_proxy.sh
+
+# Remove proxy keys from ~/.claude/settings.json and Cursor settings.json
+./start_claude_proxy.sh --stop
+```
+
+The script auto-creates `~/.claude/settings.json` or Cursor's `settings.json` if missing (with `{}`), then merges proxy keys in. `--stop` removes those keys and prints a reminder to restart Cursor / Claude Code for the change to take effect.
+
+Prerequisites: `pip install pproxy` and `jq`.
+
+### Manual configuration
+
+#### Claude Code CLI (`~/.claude/settings.json`)
+
+Add proxy environment variables under the `env` key. Claude Code spawns subprocesses (including Codex plugin) that **inherit** these variables.
+
+```json
+{
+  "env": {
+    "HTTPS_PROXY": "http://127.0.0.1:9991",
+    "HTTP_PROXY": "http://127.0.0.1:9991",
+    "NO_PROXY": "localhost,127.0.0.1"
+  }
+}
+```
+
+Reference: [Claude Code — Enterprise network configuration](https://code.claude.com/docs/en/network-config)
+
+> **Important**: Restart Claude Code after modifying `settings.json` for changes to take effect.
+
+#### Codex CLI (`~/.codex/config.toml`)
+
+Codex CLI does **not** have a dedicated proxy field in `config.toml`. It relies on environment variables inherited from the parent process.
+
+| Method | How | Use case |
+|--------|-----|----------|
+| Environment variable | `HTTPS_PROXY` / `HTTP_PROXY` | HTTP/SOCKS proxy (most common) |
+| CLI flag | `codex --proxy http://...` | One-off override |
+| Config file | `openai_base_url = "https://..."` in `~/.codex/config.toml` | API relay / base URL redirect |
+
+When running the Codex plugin inside Claude Code, the plugin spawns the `codex` binary as a subprocess. As long as `HTTPS_PROXY` is set in Claude Code's `~/.claude/settings.json` (see above), the Codex plugin will also go through the proxy automatically.
+
+Reference: [Codex — Advanced Configuration](https://developers.openai.com/codex/config-advanced/), [PR #3455](https://github.com/openai/codex/pull/3455)
+
+#### Codex plugin for Claude Code (`codex-plugin-cc`)
+
+Install inside Claude Code:
+
+```bash
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+The plugin delegates to your local `codex` CLI. It uses the same auth and proxy settings as `codex` itself — no separate proxy configuration needed. Just ensure `HTTPS_PROXY` is set via `~/.claude/settings.json` as shown above.
+
+If Codex is not logged in yet: `!codex login`
+
+Reference: [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)
+
+### Proxy configuration summary
+
+```
+~/.claude/settings.json          ← Claude Code reads this
+  └─ env.HTTPS_PROXY             ← inherited by all subprocesses
+      ├─ Claude Code API calls   ← goes through proxy
+      └─ codex plugin subprocess ← also goes through proxy
+          └─ codex CLI           ← respects HTTPS_PROXY env var
+```
+
+---
+
+## Claude Code remote settings and fewer prompts
+
+Claude Code configuration can come from multiple layers:
+
+- User settings: `~/.claude/settings.json`
+- Project settings: `.claude/settings.json`
+- Local project override: `.claude/settings.local.json`
+- Remote managed settings cache: `~/.claude/remote-settings.json`
+
+When Claude Code is attached to an org with **server-managed settings**, startup may fetch remote policy and write a local cache file at `~/.claude/remote-settings.json`. In Cursor / VS Code logs this shows up as:
+
+- `Remote managed settings loaded`
+- `Remote settings: Saved to ~/.claude/remote-settings.json`
+
+### Temporary override workaround
+
+If an org-managed policy is too noisy (for example, `permissions.ask` contains broad rules like `Bash` or `WebFetch`), an observed workaround is:
+
+1. Start Claude Code and wait for startup to finish
+2. Let Claude write `~/.claude/remote-settings.json`
+3. Edit `~/.claude/remote-settings.json` **after** startup
+
+This can temporarily override the cached remote rules for the current run, but it is **not** an official or durable configuration mechanism. Expect the file to be overwritten again by:
+
+- Restarting Claude Code
+- A later remote settings refresh
+- Reconnecting / reinitializing the IDE extension
+
+Use this only as a short-lived local override. If you need a permanent change, update the organization-side managed settings instead.
+
+### Permission modes that reduce confirmation clicks
+
+If no higher-priority managed policy overrides your local settings, these are the most useful ways to reduce prompts:
+
+| Mode / flag | Effect | Notes |
+|-------------|--------|-------|
+| `permissions.defaultMode: "acceptEdits"` | Auto-accepts file edits and common filesystem operations | Good balance when you still want Bash / network prompts |
+| `permissions.defaultMode: "bypassPermissions"` | Highest-autonomy documented mode in `settings.json` | Equivalent in spirit to starting in dangerous mode; use only in trusted environments |
+| `claude --permission-mode acceptEdits` | One-off session in accept-edits mode | Does not persist |
+| `claude --dangerously-skip-permissions` | One-off session in bypass mode | Equivalent to `--permission-mode bypassPermissions` |
+| `claude --allow-dangerously-skip-permissions` | Adds bypass mode to the `Shift+Tab` cycle without starting in it | Useful when you want to escalate later |
+
+Safer default with fewer prompts:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "acceptEdits"
+  }
+}
+```
+
+Maximum autonomy in local `settings.json`:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  }
+}
+```
+
+Important caveats:
+
+- `bypassPermissions` is the most permissive documented local setting, but use it only in a trusted repo / machine.
+- Deny rules still win over permissive modes.
+- Org-managed remote settings can still reintroduce prompts or restrictions.
+- If your org writes `~/.claude/remote-settings.json`, local `settings.json` may not fully silence all prompts until the managed policy is changed or temporarily overridden.
+
+References: [Claude Code settings](https://docs.anthropic.com/en/docs/claude-code/settings), [CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-usage), [SDK permissions](https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-permissions)
 
 ---
 

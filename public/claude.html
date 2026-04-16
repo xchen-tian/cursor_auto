@@ -22,19 +22,25 @@
     .tab.active { background: #1a1a2e; border-color: #0f3460; color: #e0e0e0; position: relative; }
     .tab.active::after { content: ''; position: absolute; bottom: -2px; left: 0; right: 0; height: 2px; background: #1a1a2e; }
     .tab .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .tab .dot.local { background: #22c55e; }
-    .tab .dot.ssh { background: #fb8c00; }
-
+    .tab .approve-badge {
+      background: #22c55e; color: #1a1a2e; font-size: 10px; font-weight: 700;
+      min-width: 16px; height: 16px; line-height: 16px; text-align: center;
+      border-radius: 8px; padding: 0 4px;
+    }
 
     #btn-ax { font-weight: 700; min-width: 70px; text-align: center; }
     #btn-ax.on  { background: #166534; border-color: #22c55e; color: #bbf7d0; }
     #btn-ax.off { background: #7f1d1d; border-color: #ef4444; color: #fecaca; }
 
-    .status { font-size: 11px; color: #64748b; }
-    .status .count { color: #facc15; font-weight: 600; }
-
     #terminal-container { flex: 1; overflow: hidden; position: relative; }
     #terminal-container .xterm { height: 100%; }
+
+    .term-panel {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      opacity: 0; pointer-events: none;
+    }
+    .term-panel.active { opacity: 1; pointer-events: auto; }
+
     #scroll-indicator {
       display: none; position: absolute; bottom: 0; left: 0; right: 0;
       padding: 6px 16px; background: rgba(251, 140, 0, 0.92); color: #1a1a2e;
@@ -94,71 +100,6 @@
       brightCyan: '#18ffff', brightWhite: '#ffffff',
     };
 
-    const term = new Terminal({
-      theme: THEME,
-      fontFamily: '"Cascadia Code", Consolas, Menlo, "DejaVu Sans Mono", monospace',
-      fontSize: 14, cursorBlink: true, allowProposedApi: true,
-    });
-    window.term = term;
-    const fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(document.getElementById('terminal-container'));
-    fitAddon.fit();
-
-    // ---- State ----------------------------------------------------------
-
-    const tabsEl = document.getElementById('tabs');
-    const btnAx = document.getElementById('btn-ax');
-    const approveCountEl = { textContent: '' }; // hidden counter
-    const overlay = document.getElementById('overlay');
-    const overlayMsg = document.getElementById('overlay-msg');
-    const overlaySub = document.getElementById('overlay-sub');
-    const btnConnect = document.getElementById('btn-connect');
-    const btnNew = document.getElementById('btn-new');
-
-    let ws = null;
-    let watchActive = true;
-    let approveCount = 0;
-    let lastApproveTs = 0;
-    let debounceTimer = null;
-    let scrollMode = false;
-    let scrollBuffer = [];
-    let scrollBufferBytes = 0;
-    let windowList = [];
-    let projectList = [];
-    let selectedWindow = null;
-    let sessionExists = false;
-
-    const tabStates = new Map();
-    function getTabState(id) {
-      if (!tabStates.has(id)) tabStates.set(id, { watchActive: true, approveCount: 0, lastApproveTs: 0 });
-      return tabStates.get(id);
-    }
-    function saveTabState() {
-      if (!selectedWindow) return;
-      const s = getTabState(selectedWindow.targetId);
-      s.watchActive = watchActive;
-      s.approveCount = approveCount;
-      s.lastApproveTs = lastApproveTs;
-      const buf = term.buffer.active;
-      const lines = [];
-      for (let i = 0; i < buf.length; i++) {
-        const l = buf.getLine(i);
-        lines.push(l ? l.translateToString(true) : '');
-      }
-      while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-      s.screenLines = lines;
-    }
-    function loadTabState(id) {
-      const s = getTabState(id);
-      watchActive = s.watchActive;
-      approveCount = s.approveCount;
-      lastApproveTs = s.lastApproveTs;
-      updateAxButton();
-    }
-
-    // ---- Client-side prompt detection -----------------------------------
-
     const PROMPT_PATTERNS = [
       /Do you want to\s+\w/i,
       /wants to\s+(create|run|execute|write|edit|read|delete|access|fetch|proceed)/i,
@@ -169,133 +110,126 @@
     const DIALOG_COMPLETE_RE = /Esc to cancel|Tab to amend|ctrl\+e to explain/i;
     const RUNNING_RE = /esc to interrupt/;
 
-    function getScreenLines() {
-      const buf = term.buffer.active;
-      const lines = [];
-      const start = buf.baseY + buf.cursorY - term.rows + 1;
-      const viewStart = Math.max(0, buf.length - term.rows);
-      for (let i = 0; i < term.rows; i++) {
-        const l = buf.getLine(viewStart + i);
-        lines.push(l ? l.translateToString(true) : '');
+    const APPROVE_COOLDOWN = 3000;
+    const DEBOUNCE_MS = 200;
+
+    // ---- DOM references ---------------------------------------------------
+
+    const termContainer = document.getElementById('terminal-container');
+    const tabsEl = document.getElementById('tabs');
+    const btnAx = document.getElementById('btn-ax');
+    const overlay = document.getElementById('overlay');
+    const overlayMsg = document.getElementById('overlay-msg');
+    const overlaySub = document.getElementById('overlay-sub');
+    const btnConnect = document.getElementById('btn-connect');
+    const btnNew = document.getElementById('btn-new');
+
+    // ---- Global state -----------------------------------------------------
+
+    let activeTabId = null;
+    let globalWatchActive = true;
+    let scrollMode = false;
+    let scrollBuffer = [];
+    let scrollBufferBytes = 0;
+    let windowList = [];
+    let projectList = [];
+
+    // Expose active tab's xterm for console debugging
+    Object.defineProperty(window, 'term', {
+      get: () => { const t = getActiveTab(); return t ? t.term : null; },
+    });
+
+    // ---- Per-tab connection (each has its own xterm) ----------------------
+
+    const tabConns = new Map();
+
+    class TabConnection {
+      constructor(tabId, win) {
+        this.tabId = tabId;
+        this.win = win;
+        this.ws = null;
+        this.sessionAlive = false;
+        this.sessionQueried = false;
+        this.sessionExists = false;
+        this.approveCount = 0;
+        this.lastApproveTs = 0;
+        this.debounceTimer = null;
+        this.reconnectTimer = null;
+        this.reconnectDelay = 1000;
+
+        this.panel = document.createElement('div');
+        this.panel.className = 'term-panel';
+        termContainer.appendChild(this.panel);
+
+        this.term = new Terminal({
+          theme: THEME,
+          fontFamily: '"Cascadia Code", Consolas, Menlo, "DejaVu Sans Mono", monospace',
+          fontSize: 14, cursorBlink: true, allowProposedApi: true,
+        });
+        this.fitAddon = new FitAddon.FitAddon();
+        this.term.loadAddon(this.fitAddon);
+        this.term.open(this.panel);
+        this.fitAddon.fit();
+
+        this.term.onData((data) => {
+          if (this.tabId !== activeTabId || scrollMode) return;
+          tabSend(this, { type: 'input', data });
+        });
+
+        this.term.attachCustomKeyEventHandler((e) => {
+          if (this.tabId !== activeTabId) return true;
+          if (!scrollMode) {
+            if (e.type === 'keydown' && e.key === 'PageUp') {
+              enterScrollMode();
+              this.term.scrollPages(-1);
+              return false;
+            }
+            return true;
+          }
+          if (e.type === 'keydown') {
+            switch (e.key) {
+              case 'Escape': case 'q': exitScrollMode(); return false;
+              case 'ArrowUp': this.term.scrollLines(-1); return false;
+              case 'ArrowDown': this.term.scrollLines(1); return false;
+              case 'PageUp': this.term.scrollPages(-1); return false;
+              case 'PageDown': this.term.scrollPages(1); return false;
+              case 'Home': this.term.scrollToTop(); return false;
+              case 'End': this.term.scrollToBottom(); return false;
+            }
+          }
+          return false;
+        });
+
+        this.panel.addEventListener('wheel', (e) => {
+          if (this.tabId !== activeTabId || scrollMode || e.deltaY >= 0) return;
+          if (this.term.buffer.active.baseY > 0) enterScrollMode();
+        }, { passive: true, capture: true });
       }
-      return lines;
+
+      getScreenLines() {
+        const buf = this.term.buffer.active;
+        const lines = [];
+        const viewStart = Math.max(0, buf.length - this.term.rows);
+        for (let i = 0; i < this.term.rows; i++) {
+          const l = buf.getLine(viewStart + i);
+          lines.push(l ? l.translateToString(true) : '');
+        }
+        return lines;
+      }
     }
+
+    // ---- Helpers ----------------------------------------------------------
+
+    function tabSend(tab, msg) {
+      if (tab.ws && tab.ws.readyState === 1) tab.ws.send(JSON.stringify(msg));
+    }
+
+    function getActiveTab() { return tabConns.get(activeTabId) || null; }
 
     function detectPrompt(text) {
       for (const re of PROMPT_PATTERNS) { if (re.test(text)) return true; }
       return false;
     }
-
-    function findYesRow(lines) {
-      for (let i = 0; i < lines.length; i++) {
-        if (/❯\s*\d+\.\s*Yes/.test(lines[i])) return i;
-      }
-      return -1;
-    }
-
-    function flashYesRow(screenRow) {
-      const s = document.querySelector('.xterm-screen');
-      if (!s) return;
-      const h = s.offsetHeight / term.rows;
-      s.style.position = 'relative';
-
-      const bar = document.createElement('div');
-      bar.style.cssText = `position:absolute;left:0;width:100%;top:${screenRow*h}px;height:${h}px;background:#22c55e;opacity:0;pointer-events:none;z-index:5;`;
-      s.appendChild(bar);
-
-      // Flash twice: on→off→on→off
-      bar.style.opacity = '0.4';
-      setTimeout(() => { bar.style.opacity = '0'; }, 120);
-      setTimeout(() => { bar.style.opacity = '0.4'; }, 240);
-      setTimeout(() => { bar.style.opacity = '0'; }, 360);
-      setTimeout(() => { bar.remove(); }, 400);
-    }
-
-    function checkAndApprove() {
-      if (!watchActive || scrollMode) return;
-      if (Date.now() - lastApproveTs < 3000) return;
-      const lines = getScreenLines();
-      const screen = lines.join('\n');
-
-      // Don't approve if a command is still running
-      if (RUNNING_RE.test(screen)) return;
-
-      if (detectPrompt(screen) && DIALOG_COMPLETE_RE.test(screen)) {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => { debounceTimer = null; doApprove(); }, 200);
-      }
-    }
-
-    function doApprove() {
-      // Re-read screen at approve time (may have changed since debounce started)
-      const lines = getScreenLines();
-      const screen = lines.join('\n');
-      if (RUNNING_RE.test(screen)) return;
-      if (!detectPrompt(screen)) return;
-
-      const row = findYesRow(lines);
-      approveCount++;
-      lastApproveTs = Date.now();
-      approveCountEl.textContent = approveCount;
-
-      // Flash first, THEN approve after flash completes
-      if (row >= 0) flashYesRow(row);
-      btnAx.style.transition = 'none';
-      btnAx.style.boxShadow = '0 0 12px 4px #22c55e';
-      setTimeout(() => { btnAx.style.transition = 'box-shadow 0.5s'; btnAx.style.boxShadow = 'none'; }, 400);
-
-      setTimeout(() => {
-        wsSend({ type: 'approve' });
-      }, 400);
-    }
-
-    function updateAxButton() {
-      btnAx.textContent = watchActive ? 'AX \u25CF' : 'AX \u25A0';
-      btnAx.className = watchActive ? 'on' : 'off';
-    }
-
-    // ---- Scroll Mode (tmux-like) ----------------------------------------
-
-    function enterScrollMode() {
-      if (scrollMode) return;
-      scrollMode = true;
-      scrollBuffer = [];
-      scrollBufferBytes = 0;
-      updateScrollIndicator();
-    }
-
-    function exitScrollMode() {
-      if (!scrollMode) return;
-      scrollMode = false;
-      if (scrollBuffer.length > 0) {
-        let total = 0;
-        for (const c of scrollBuffer) total += c.byteLength;
-        const merged = new Uint8Array(total);
-        let off = 0;
-        for (const c of scrollBuffer) { merged.set(new Uint8Array(c), off); off += c.byteLength; }
-        scrollBuffer = [];
-        scrollBufferBytes = 0;
-        term.write(merged, () => term.scrollToBottom());
-      } else {
-        term.scrollToBottom();
-      }
-      updateScrollIndicator();
-    }
-
-    function updateScrollIndicator() {
-      const el = document.getElementById('scroll-indicator');
-      if (scrollMode) {
-        const kb = (scrollBufferBytes / 1024).toFixed(1);
-        el.innerHTML = '\u23F8 SCROLL MODE \u2014 '
-          + scrollBuffer.length + ' chunk(s), ' + kb + ' KB buffered \u2014 '
-          + '<kbd>Esc</kbd> / <kbd>q</kbd> to resume';
-        el.style.display = 'block';
-      } else {
-        el.style.display = 'none';
-      }
-    }
-
-    // ---- Resolve window → project info ----------------------------------
 
     function parseWindowHost(title) {
       const m = title.match(/\[SSH:\s*([^\]]+)\]/);
@@ -331,134 +265,314 @@
       return { sessionType: 'local', host: null, cwd: projectName };
     }
 
-    // ---- Tabs -----------------------------------------------------------
+    function findYesRow(lines) {
+      for (let i = 0; i < lines.length; i++) {
+        if (/❯\s*\d+\.\s*Yes/.test(lines[i])) return i;
+      }
+      return -1;
+    }
 
-    function renderTabs() {
-      tabsEl.innerHTML = '';
-      for (const w of windowList) {
-        const tab = document.createElement('div');
-        tab.className = 'tab' + (selectedWindow && selectedWindow.targetId === w.targetId ? ' active' : '');
+    function flashYesRow(tab, screenRow) {
+      const s = tab.panel.querySelector('.xterm-screen');
+      if (!s) return;
+      const h = s.offsetHeight / tab.term.rows;
+      s.style.position = 'relative';
+      const bar = document.createElement('div');
+      bar.style.cssText = `position:absolute;left:0;width:100%;top:${screenRow*h}px;height:${h}px;background:#22c55e;opacity:0;pointer-events:none;z-index:5;`;
+      s.appendChild(bar);
+      bar.style.opacity = '0.4';
+      setTimeout(() => { bar.style.opacity = '0'; }, 120);
+      setTimeout(() => { bar.style.opacity = '0.4'; }, 240);
+      setTimeout(() => { bar.style.opacity = '0'; }, 360);
+      setTimeout(() => { bar.remove(); }, 400);
+    }
 
-        const dot = document.createElement('span');
-        const host = parseWindowHost(w.title);
-        dot.className = 'dot ' + (host ? 'ssh' : 'local');
-        tab.appendChild(dot);
+    // ---- Per-tab prompt detection & auto-approve --------------------------
 
-        const label = document.createElement('span');
-        const proj = w.project || parseWindowProject(w.title);
-        label.textContent = host ? `[${host}] ${proj}` : proj;
-        tab.appendChild(label);
+    function checkTabApprove(tab) {
+      if (!globalWatchActive || !tab.sessionAlive) return;
+      if (tab.tabId === activeTabId && scrollMode) return;
+      if (Date.now() - tab.lastApproveTs < APPROVE_COOLDOWN) return;
 
-        tab.onclick = () => selectWindow(w);
-        tabsEl.appendChild(tab);
+      const lines = tab.getScreenLines();
+      const screen = lines.join('\n');
+
+      if (RUNNING_RE.test(screen)) return;
+
+      if (detectPrompt(screen) && DIALOG_COMPLETE_RE.test(screen)) {
+        if (tab.debounceTimer) clearTimeout(tab.debounceTimer);
+        tab.debounceTimer = setTimeout(() => {
+          tab.debounceTimer = null;
+          doTabApprove(tab);
+        }, DEBOUNCE_MS);
       }
     }
 
-    function selectWindow(win) {
-      if (scrollMode) { scrollMode = false; scrollBuffer = []; scrollBufferBytes = 0; updateScrollIndicator(); }
-      saveTabState();
-      wsSend({ type: 'detach' });
-      selectedWindow = win;
-      loadTabState(win.targetId);
-      renderTabs();
-      term.reset();
+    function doTabApprove(tab) {
+      const lines = tab.getScreenLines();
+      const screen = lines.join('\n');
 
-      const saved = getTabState(win.targetId);
-      if (saved.screenLines && saved.screenLines.length) {
-        term.write(saved.screenLines.join('\r\n'));
-      }
+      if (RUNNING_RE.test(screen)) return;
+      if (!detectPrompt(screen)) return;
 
-      const info = resolveProjectInfo(win);
-      if (!ws || ws.readyState !== 1) {
-        openWs(() => queryAndShow(info));
+      tab.approveCount++;
+      tab.lastApproveTs = Date.now();
+
+      const isActive = tab.tabId === activeTabId;
+
+      if (isActive) {
+        const row = findYesRow(lines);
+        if (row >= 0) flashYesRow(tab, row);
+        btnAx.style.transition = 'none';
+        btnAx.style.boxShadow = '0 0 12px 4px #22c55e';
+        setTimeout(() => {
+          btnAx.style.transition = 'box-shadow 0.5s';
+          btnAx.style.boxShadow = 'none';
+        }, 400);
+        setTimeout(() => tabSend(tab, { type: 'approve' }), 400);
       } else {
-        queryAndShow(info);
+        tabSend(tab, { type: 'approve' });
       }
+
+      renderTabs();
     }
 
-    function queryAndShow(info) {
-      const handler = (evt) => {
-        let msg;
-        try { msg = JSON.parse(evt.data); } catch { return; }
-        if (msg.type === 'query_result') {
-          ws.removeEventListener('message', handler);
-          sessionExists = msg.exists;
-          if (msg.exists) {
-            const saved = getTabState(selectedWindow.targetId);
-            if (saved.screenLines && saved.screenLines.length > 0) {
-              wsSend({ type: 'attach', ...info, skipReplay: true });
-            } else {
-              showOverlay('Session active', 'Reconnect');
-            }
-          } else {
-            showOverlay('No active session', 'Start Claude');
-          }
-        }
-      };
-      ws.addEventListener('message', handler);
-      wsSend({ type: 'query', ...info });
-    }
+    // ---- WebSocket per tab ------------------------------------------------
 
-    // ---- WebSocket ------------------------------------------------------
+    function openTabWs(tab) {
+      if (tab.ws && (tab.ws.readyState === 0 || tab.ws.readyState === 1)) return;
 
-    function openWs(onOpen) {
-      if (ws) try { ws.close(); } catch {}
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/api/claude/ws`);
-      ws.onmessage = onWsMessage;
-      ws.onclose = () => showOverlay('Disconnected', 'Reconnect');
-      ws.onopen = () => { fitAddon.fit(); if (onOpen) onOpen(); };
-    }
+      const ws = new WebSocket(`${proto}://${location.host}/api/claude/ws`);
+      ws.binaryType = 'arraybuffer';
+      tab.ws = ws;
 
-    function wsSend(msg) {
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
-    }
+      ws.addEventListener('open', () => {
+        tab.reconnectDelay = 1000;
+        tab.sessionQueried = false;
+        const info = resolveProjectInfo(tab.win);
+        tabSend(tab, { type: 'query', ...info });
+      });
 
-    function onWsMessage(evt) {
-      if (typeof evt.data !== 'string') {
-        const handleBin = (ab) => {
-          if (scrollMode) {
-            scrollBuffer.push(ab);
-            scrollBufferBytes += ab.byteLength;
-            updateScrollIndicator();
-            return;
-          }
-          term.write(new Uint8Array(ab), () => { if (!scrollMode) term.scrollToBottom(); });
-        };
-        if (evt.data instanceof Blob) {
-          evt.data.arrayBuffer().then(handleBin);
-        } else if (evt.data instanceof ArrayBuffer) {
-          handleBin(evt.data);
+      ws.addEventListener('message', (evt) => onTabMessage(tab, evt));
+
+      ws.addEventListener('close', () => {
+        tab.sessionAlive = false;
+        if (tab.tabId === activeTabId) {
+          showOverlay('Disconnected', 'Reconnect');
         }
+        renderTabs();
+        if (tab.reconnectTimer) clearTimeout(tab.reconnectTimer);
+        tab.reconnectTimer = setTimeout(() => {
+          tab.reconnectTimer = null;
+          openTabWs(tab);
+        }, tab.reconnectDelay);
+        tab.reconnectDelay = Math.min(tab.reconnectDelay * 2, 30000);
+      });
+
+      ws.addEventListener('error', () => {});
+    }
+
+    function onTabMessage(tab, evt) {
+      const isActive = tab.tabId === activeTabId;
+
+      if (evt.data instanceof ArrayBuffer) {
+        const ab = evt.data;
+        const chunk = new Uint8Array(ab);
+
+        if (isActive && scrollMode) {
+          scrollBuffer.push(ab);
+          scrollBufferBytes += ab.byteLength;
+          updateScrollIndicator();
+        } else {
+          tab.term.write(chunk);
+          if (isActive && !scrollMode) tab.term.scrollToBottom();
+        }
+
+        checkTabApprove(tab);
         return;
       }
 
-      // Text frame = JSON control message
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
+
       switch (msg.type) {
+        case 'query_result':
+          tab.sessionQueried = true;
+          tab.sessionExists = msg.exists;
+          if (msg.exists) {
+            const info = resolveProjectInfo(tab.win);
+            tabSend(tab, { type: 'attach', ...info });
+          } else if (isActive) {
+            showOverlay('No active session', 'Start Claude');
+          }
+          renderTabs();
+          break;
+
         case 'session':
-          hideOverlay();
-          if (msg.replay) term.write('\x1B[2J\x1B[H');
-          // Briefly change cols to force SIGWINCH → Ink full redraw
-          wsSend({ type: 'resize', cols: term.cols + 1, rows: term.rows });
-          setTimeout(() => wsSend({ type: 'resize', cols: term.cols, rows: term.rows }), 80);
-          term.focus();
+          tab.sessionAlive = true;
+          if (msg.replay) tab.term.write('\x1B[2J\x1B[H');
+          if (isActive) {
+            hideOverlay();
+            tabSend(tab, { type: 'resize', cols: tab.term.cols + 1, rows: tab.term.rows });
+            setTimeout(() => {
+              tabSend(tab, { type: 'resize', cols: tab.term.cols, rows: tab.term.rows });
+              tab.term.focus();
+            }, 80);
+          }
+          renderTabs();
           break;
+
         case 'exit':
-          if (scrollMode) exitScrollMode();
-          showOverlay(msg.reason === 'idle_timeout' ? 'Session timed out' : 'Session ended', 'Start Claude');
+          tab.sessionAlive = false;
+          tab.sessionExists = false;
+          if (isActive) {
+            if (scrollMode) exitScrollMode();
+            showOverlay(msg.reason === 'idle_timeout' ? 'Session timed out' : 'Session ended', 'Start Claude');
+          }
+          renderTabs();
           break;
+
         case 'error':
-          if (scrollMode) exitScrollMode();
-          showOverlay(msg.message, 'Retry');
+          if (isActive) {
+            if (scrollMode) exitScrollMode();
+            showOverlay(msg.message, 'Retry');
+          }
           break;
+
         case 'no_session':
-          if (scrollMode) exitScrollMode();
-          showOverlay('Session expired', 'Start Claude');
+          tab.sessionAlive = false;
+          tab.sessionExists = false;
+          if (isActive) {
+            if (scrollMode) exitScrollMode();
+            showOverlay('Session expired', 'Start Claude');
+          }
+          renderTabs();
           break;
       }
     }
+
+    function ensureTabWsReady(tab) {
+      return new Promise((resolve, reject) => {
+        if (tab.ws && tab.ws.readyState === 1) return resolve();
+        const setup = () => {
+          const cleanup = () => {
+            tab.ws.removeEventListener('open', onOpen);
+            tab.ws.removeEventListener('close', onClose);
+          };
+          const onOpen = () => { cleanup(); resolve(); };
+          const onClose = () => { cleanup(); reject(new Error('WebSocket closed')); };
+          tab.ws.addEventListener('open', onOpen);
+          tab.ws.addEventListener('close', onClose);
+        };
+        if (tab.ws && tab.ws.readyState === 0) { setup(); return; }
+        openTabWs(tab);
+        setup();
+      });
+    }
+
+    // ---- Tab rendering ----------------------------------------------------
+
+    function renderTabs() {
+      tabsEl.innerHTML = '';
+      for (const [tabId, tab] of tabConns) {
+        const el = document.createElement('div');
+        el.className = 'tab' + (tabId === activeTabId ? ' active' : '');
+
+        const dot = document.createElement('span');
+        const host = parseWindowHost(tab.win.title);
+        dot.className = 'dot';
+        dot.style.background = tab.sessionAlive ? (host ? '#fb8c00' : '#22c55e') : '#64748b';
+        el.appendChild(dot);
+
+        const label = document.createElement('span');
+        const proj = tab.win.project || parseWindowProject(tab.win.title);
+        label.textContent = host ? `[${host}] ${proj}` : proj;
+        el.appendChild(label);
+
+        if (tab.approveCount > 0) {
+          const badge = document.createElement('span');
+          badge.className = 'approve-badge';
+          badge.textContent = tab.approveCount;
+          el.appendChild(badge);
+        }
+
+        el.onclick = () => selectTab(tabId);
+        tabsEl.appendChild(el);
+      }
+    }
+
+    // ---- Tab selection ----------------------------------------------------
+
+    function selectTab(tabId) {
+      if (scrollMode) exitScrollMode();
+
+      activeTabId = tabId;
+
+      for (const [id, t] of tabConns) {
+        if (id === tabId) t.panel.classList.add('active');
+        else t.panel.classList.remove('active');
+      }
+
+      const tab = tabConns.get(tabId);
+      renderTabs();
+
+      if (!tab) return;
+
+      if (tab.sessionAlive) {
+        hideOverlay();
+        tab.term.focus();
+      } else if (tab.sessionQueried) {
+        showOverlay(
+          tab.sessionExists ? 'Session active' : 'No active session',
+          tab.sessionExists ? 'Reconnect' : 'Start Claude'
+        );
+      } else {
+        showOverlay('Connecting...', '', false);
+      }
+    }
+
+    // ---- Start / Attach sessions ------------------------------------------
+
+    async function startActiveSession(newSession) {
+      const tab = getActiveTab();
+      if (!tab) return;
+
+      hideOverlay();
+      tab.term.reset();
+
+      try {
+        await ensureTabWsReady(tab);
+      } catch {
+        showOverlay('Connection failed', 'Retry');
+        return;
+      }
+
+      const info = resolveProjectInfo(tab.win);
+      tab.fitAddon.fit();
+      tabSend(tab, { type: 'start', ...info, cols: tab.term.cols, rows: tab.term.rows, newSession: !!newSession });
+    }
+
+    async function attachActiveSession() {
+      const tab = getActiveTab();
+      if (!tab) return;
+
+      hideOverlay();
+      tab.term.reset();
+
+      try {
+        await ensureTabWsReady(tab);
+      } catch {
+        showOverlay('Connection failed', 'Retry');
+        return;
+      }
+
+      const info = resolveProjectInfo(tab.win);
+      tab.fitAddon.fit();
+      tabSend(tab, { type: 'attach', ...info });
+    }
+
+    // ---- Overlay ----------------------------------------------------------
 
     function showOverlay(message, buttonLabel, showNew) {
       overlayMsg.textContent = message;
@@ -472,102 +586,84 @@
       overlay.classList.remove('show');
     }
 
-    // ---- Connect button -------------------------------------------------
+    // ---- AX button --------------------------------------------------------
 
-    function startSession(newSession) {
-      if (!selectedWindow) return;
-      const info = resolveProjectInfo(selectedWindow);
-      hideOverlay();
-      term.reset();
-
-      const doAction = () => {
-        fitAddon.fit();
-        wsSend({ type: 'start', ...info, cols: term.cols, rows: term.rows, newSession: !!newSession });
-      };
-
-      if (!ws || ws.readyState !== 1) {
-        openWs(doAction);
-      } else {
-        doAction();
-      }
+    function updateAxButton() {
+      btnAx.textContent = globalWatchActive ? 'AX \u25CF' : 'AX \u25A0';
+      btnAx.className = globalWatchActive ? 'on' : 'off';
     }
-
-    function attachSession() {
-      if (!selectedWindow) return;
-      const info = resolveProjectInfo(selectedWindow);
-      hideOverlay();
-      term.reset();
-
-      const doAction = () => {
-        fitAddon.fit();
-        wsSend({ type: 'attach', ...info });
-      };
-
-      if (!ws || ws.readyState !== 1) {
-        openWs(doAction);
-      } else {
-        doAction();
-      }
-    }
-
-    btnConnect.addEventListener('click', () => {
-      if (sessionExists) attachSession();
-      else startSession(false);
-    });
-    btnNew.addEventListener('click', () => startSession(true));
-
-    // ---- Events ---------------------------------------------------------
-
-    term.onData((data) => {
-      if (scrollMode) return;
-      wsSend({ type: 'input', data });
-    });
-
-    term.attachCustomKeyEventHandler((e) => {
-      if (!scrollMode) {
-        if (e.type === 'keydown' && e.key === 'PageUp') {
-          enterScrollMode();
-          term.scrollPages(-1);
-          return false;
-        }
-        return true;
-      }
-      if (e.type === 'keydown') {
-        switch (e.key) {
-          case 'Escape': case 'q': exitScrollMode(); return false;
-          case 'ArrowUp': term.scrollLines(-1); return false;
-          case 'ArrowDown': term.scrollLines(1); return false;
-          case 'PageUp': term.scrollPages(-1); return false;
-          case 'PageDown': term.scrollPages(1); return false;
-          case 'Home': term.scrollToTop(); return false;
-          case 'End': term.scrollToBottom(); return false;
-        }
-      }
-      return false;
-    });
-
-    {
-      function onWheelUp(e) {
-        if (scrollMode || e.deltaY >= 0) return;
-        if (term.buffer.active.baseY > 0) enterScrollMode();
-      }
-      const vp = document.querySelector('.xterm-viewport');
-      if (vp) vp.addEventListener('wheel', onWheelUp, { passive: true });
-      term.element.addEventListener('wheel', onWheelUp, { passive: true, capture: true });
-    }
-
-    new ResizeObserver(() => {
-      fitAddon.fit();
-      wsSend({ type: 'resize', cols: term.cols, rows: term.rows });
-    }).observe(document.getElementById('terminal-container'));
 
     btnAx.addEventListener('click', () => {
-      watchActive = !watchActive;
+      globalWatchActive = !globalWatchActive;
       updateAxButton();
-      if (watchActive) checkAndApprove();
+      if (globalWatchActive) {
+        for (const tab of tabConns.values()) {
+          if (tab.sessionAlive) checkTabApprove(tab);
+        }
+      }
     });
 
-    // ---- Init -----------------------------------------------------------
+    // ---- Scroll Mode (active tab only) ------------------------------------
+
+    function enterScrollMode() {
+      if (scrollMode) return;
+      scrollMode = true;
+      scrollBuffer = [];
+      scrollBufferBytes = 0;
+      updateScrollIndicator();
+    }
+
+    function exitScrollMode() {
+      if (!scrollMode) return;
+      scrollMode = false;
+      const tab = getActiveTab();
+      if (tab && scrollBuffer.length > 0) {
+        let total = 0;
+        for (const c of scrollBuffer) total += c.byteLength;
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of scrollBuffer) { merged.set(new Uint8Array(c), off); off += c.byteLength; }
+        scrollBuffer = [];
+        scrollBufferBytes = 0;
+        tab.term.write(merged, () => tab.term.scrollToBottom());
+      } else {
+        if (tab) tab.term.scrollToBottom();
+      }
+      updateScrollIndicator();
+    }
+
+    function updateScrollIndicator() {
+      const el = document.getElementById('scroll-indicator');
+      if (scrollMode) {
+        const kb = (scrollBufferBytes / 1024).toFixed(1);
+        el.innerHTML = '\u23F8 SCROLL MODE \u2014 '
+          + scrollBuffer.length + ' chunk(s), ' + kb + ' KB buffered \u2014 '
+          + '<kbd>Esc</kbd> / <kbd>q</kbd> to resume';
+        el.style.display = 'block';
+      } else {
+        el.style.display = 'none';
+      }
+    }
+
+    // ---- Connect / New buttons -------------------------------------------
+
+    btnConnect.addEventListener('click', () => {
+      const tab = getActiveTab();
+      if (tab && tab.sessionExists) attachActiveSession();
+      else startActiveSession(false);
+    });
+    btnNew.addEventListener('click', () => startActiveSession(true));
+
+    // ---- Resize -----------------------------------------------------------
+
+    new ResizeObserver(() => {
+      for (const tab of tabConns.values()) {
+        tab.fitAddon.fit();
+        tabSend(tab, { type: 'resize', cols: tab.term.cols, rows: tab.term.rows });
+      }
+    }).observe(termContainer);
+
+    // ---- Init -------------------------------------------------------------
 
     const params = new URLSearchParams(location.search);
     const initTargetId = params.get('targetId');
@@ -592,20 +688,26 @@
         return;
       }
 
-      renderTabs();
+      for (const win of windowList) {
+        const tab = new TabConnection(win.targetId, win);
+        tabConns.set(win.targetId, tab);
+        openTabWs(tab);
+      }
 
       const target = initTargetId
         ? windowList.find(w => w.targetId === initTargetId) || windowList[0]
         : windowList[0];
 
-      selectWindow(target);
+      selectTab(target.targetId);
     }
 
     init();
 
-    // Periodic auto-approve check (500ms) — reliable fallback since
-    // write callbacks may not fire in all browsers/headless environments
-    setInterval(checkAndApprove, 500);
+    setInterval(() => {
+      for (const tab of tabConns.values()) {
+        if (tab.sessionAlive) checkTabApprove(tab);
+      }
+    }, 500);
   </script>
 </body>
 </html>

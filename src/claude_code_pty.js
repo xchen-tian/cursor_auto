@@ -18,7 +18,7 @@
 
 const fs = require('fs');
 const { execFileSync } = require('child_process');
-const pty = require('node-pty');
+const pty = require('./node_pty');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 
